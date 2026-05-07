@@ -74,11 +74,40 @@ dest = "~/.local/share/dev-utilities"
 
 [component_config.bitbucket-mcp]
 path = "~/.local/share/dev-utilities/bitbucket-mcp"
+
+# On work machines, override the personal identity's github.com helper from
+# its default (ssh) to gcm — corporate networks often gate GitHub behind SSO
+# which only works through the OAuth flow. The override is merged onto the
+# identity's applies_to entry that matches `host = "github.com"`.
+[[identity_overrides.personal.applies_to]]
+host = "github.com"
+credential_helper = "gcm"
 ```
 
 That's it — `bash bootstrap.sh` will offer the new profile in the
 profile picker, then offer your `personal` and `work` BW identities in
 the identity picker.
+
+## Per-profile identity tweaks
+
+The `[[identity_overrides.<name>.applies_to]]` block above is the
+escape hatch when one identity needs different behavior on different
+profiles. Common case: `credential_helper` (ssh on personal machines,
+gcm on work machines). It also works for any other applies_to field
+(`bw_credential_item`, `register_url`, etc.) and for top-level identity
+fields too:
+
+```toml
+[identity_overrides.personal]
+ssh_key_basename = "id_ed25519_personal_alt"   # override top-level field
+
+[[identity_overrides.personal.applies_to]]
+host = "github.com"
+credential_helper = "gcm"
+```
+
+Override matching is by `host`. If no existing applies_to entry has
+that host, the override is appended as a new entry.
 
 ## Keeping `local/` synced across machines
 

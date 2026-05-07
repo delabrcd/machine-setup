@@ -219,6 +219,25 @@ The `ssh-key` component also auto-generates a fresh ed25519 key the
 first time it can't find a BW item for an identity, then stores it back
 in BW — same flow as before.
 
+## Per-profile identity overrides
+
+When the same identity needs different behavior on different machines
+(typical case: personal identity uses SSH at home but GCM on a work
+laptop where corporate SSO gates GitHub), declare an override in the
+profile:
+
+```toml
+# local/profiles/work-desktop.toml
+[[identity_overrides.personal.applies_to]]
+host = "github.com"
+credential_helper = "gcm"
+```
+
+The override is merged on top of the identity's existing applies_to
+entry that matches by `host`. If no entry matches, it's appended.
+Top-level identity fields (e.g. `ssh_key_basename`) can also be
+overridden via `[identity_overrides.<name>]` directly.
+
 ## Bitwarden credential helper (HTTPS auth)
 
 For hosts that auth via username/api-token (corporate Bitbucket etc.),

@@ -130,7 +130,46 @@ def load_profile(name: str) -> dict:
     data.setdefault("components", [])
     data.setdefault("identities", [])
     data.setdefault("component_config", {})
+    data.setdefault("identity_overrides", {})
     return data
+
+
+def _apply_identity_overrides(identity: dict, overrides: dict) -> None:
+    """Merge per-host applies_to overrides into the resolved identity in place.
+
+    Profile schema (also accepted in machine.toml later if we extend it):
+
+        [[identity_overrides.personal.applies_to]]
+        host = "github.com"
+        credential_helper = "gcm"
+
+    Lookup is by `host` — if the identity already has an applies_to entry for
+    that host, override-keys are merged onto it (override wins). If no entry
+    matches, the override is appended as a new applies_to entry.
+    """
+    if not overrides:
+        return
+    for over_at in overrides.get("applies_to", []) or []:
+        host = over_at.get("host")
+        if not host:
+            continue
+        merged = False
+        for at in identity.get("applies_to", []):
+            if at.get("host") == host:
+                for k, v in over_at.items():
+                    if k == "host":
+                        continue
+                    at[k] = v
+                merged = True
+                break
+        if not merged:
+            identity.setdefault("applies_to", []).append(dict(over_at))
+    # Top-level identity-field overrides (rare but useful — e.g. force a
+    # different ssh_key_basename on this profile).
+    for k, v in overrides.items():
+        if k == "applies_to":
+            continue
+        identity[k] = v
 
 
 def _registry_lookup(name: str) -> dict | None:
@@ -333,6 +372,14 @@ def cmd_resolve(args):
     else:
         identity_names = profile["identities"]
     identities = [load_identity(n) for n in identity_names]
+
+    # Apply per-identity overrides from the profile (e.g. force credential_helper
+    # = "gcm" for personal/github.com on a work-desktop profile).
+    overrides_map = profile.get("identity_overrides", {}) or {}
+    for ident in identities:
+        ident_overrides = overrides_map.get(ident["name"])
+        if ident_overrides:
+            _apply_identity_overrides(ident, ident_overrides)
 
     # Decorate each component with the per-OS script path (if any)
     kind = "linux" if os_tag.startswith("linux") else os_tag
