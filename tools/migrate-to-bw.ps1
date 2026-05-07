@@ -86,18 +86,19 @@ print(d.get('bw_ssh_item', '') or '')
         $sshFrom = $sshFrom.Trim()
         $targetName = "Machine Identity: $name"
 
+        $seed = Join-Path $repoRoot "tools\seed-bw-identity.ps1"
         if ($sshFrom -and $sshFrom -ne $targetName) {
             Invoke-Step "$($f.FullName) -> $targetName  (SSH from '$sshFrom')" {
-                bash "$repoRoot/tools/seed-bw-identity.sh" from-toml $f.FullName --ssh-from $sshFrom
+                & $seed from-toml $f.FullName -SshFrom $sshFrom
             }
         } elseif ($sshFrom -eq $targetName) {
             Invoke-Step "$($f.FullName) -> $targetName  (SSH already in place)" {
-                bash "$repoRoot/tools/seed-bw-identity.sh" from-toml $f.FullName
+                & $seed from-toml $f.FullName
             }
         } else {
             Write-Warning "  $($f.FullName) has no bw_ssh_item field -- pushing without SSH key"
             Invoke-Step "$($f.FullName) -> $targetName" {
-                bash "$repoRoot/tools/seed-bw-identity.sh" from-toml $f.FullName
+                & $seed from-toml $f.FullName
             }
         }
     }
