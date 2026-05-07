@@ -58,6 +58,10 @@ DEST="$HOME/.local/share/machine-setup"
 mkdir -p "$(dirname "$DEST")"
 if [ -d "$DEST/.git" ]; then
   echo "    Updating $DEST"
+  # Force origin to the public HTTPS URL — handles older checkouts whose
+  # origin was the (now archived) private SSH URL and would fail to fetch
+  # without an SSH key loaded into agent.
+  git -C "$DEST" remote set-url origin "$REPO_URL"
   git -C "$DEST" fetch origin
   git -C "$DEST" reset --hard origin/HEAD
 else
