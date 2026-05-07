@@ -9,7 +9,7 @@ foreach ($ident in $script:Plan.identities) {
     if ($ident.bw_ssh_item) { $items += $ident.bw_ssh_item }
 }
 if ($items.Count -eq 0) {
-    Write-Log "bw-unlock-shell: no BW SSH items in plan — installing a no-op stub"
+    Write-Log "bw-unlock-shell: no BW SSH items in plan -- installing a no-op stub"
 }
 
 # Build the PS array literal of item names (single-quoted, with ' escaped as '')
@@ -60,7 +60,7 @@ function bw-unlock {
 "@
 
 # Ensure the profile we're about to write isn't blocked by a hardened
-# ExecutionPolicy. Same logic as before — only intervene when needed.
+# ExecutionPolicy. Same logic as before -- only intervene when needed.
 $effective = Get-ExecutionPolicy
 if ($effective -notin @("RemoteSigned", "Unrestricted", "Bypass")) {
     Write-Log "Setting CurrentUser ExecutionPolicy to RemoteSigned (effective: $effective)"

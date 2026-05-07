@@ -38,7 +38,7 @@ function Set-MarkedRegion {
     Write-LfFile -Path $Path -Content $newContent
 }
 
-# Exact-name BW lookup — `bw get item NAME` matches by substring, so it returns
+# Exact-name BW lookup -- `bw get item NAME` matches by substring, so it returns
 # multiple items when one name is a prefix of another.
 function Get-BwItemExact {
     param([string]$Name)

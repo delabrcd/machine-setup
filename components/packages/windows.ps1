@@ -1,7 +1,7 @@
 . "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
 
 # Base packages for Windows host. Note: uv (uvx) deliberately NOT installed here
-# — corporate AV often scans/blocks the binary. Use the WSL side for uvx-based
+# -- corporate AV often scans/blocks the binary. Use the WSL side for uvx-based
 # tooling instead.
 
 Install-Winget -Id "Git.Git"               -Label "Git for Windows"

@@ -152,14 +152,17 @@ def load_component_manifest(name: str) -> dict:
     return data
 
 
-def resolve_components(profile: dict, os_tag: str) -> list[dict]:
-    """Topo-sort the profile's components, pulling in transitive deps.
+def resolve_components(profile: dict, os_tag: str, override: list[str] | None = None) -> list[dict]:
+    """Topo-sort components, pulling in transitive deps.
 
     os_tag is one of: linux-ubuntu, linux-fedora, linux-arch, windows, wsl, macos.
     Components whose `supported` list omits os_tag are skipped silently — that's
     how a single profile works on multiple OSes (e.g. uv on Linux only).
+
+    If `override` is given, it replaces the profile's components list entirely
+    (deps are still pulled in transitively). This is the picker's escape hatch.
     """
-    explicit = list(profile["components"])
+    explicit = list(override if override is not None else profile["components"])
     visited: set[str] = set()
     order: list[str] = []
 
@@ -184,6 +187,30 @@ def resolve_components(profile: dict, os_tag: str) -> list[dict]:
             continue
         out.append(m)
     return out
+
+
+def list_all_components() -> list[dict]:
+    """Every component known across local/ + repo, deduped by name (local wins)."""
+    seen: dict[str, dict] = {}
+    for base in (REPO, LOCAL):
+        d = base / "components"
+        if not d.is_dir():
+            continue
+        for entry in sorted(d.iterdir()):
+            manifest = entry / "manifest.toml"
+            if not manifest.exists():
+                continue
+            data = _load_toml(manifest)
+            name = data.get("name") or entry.name
+            seen[name] = {
+                "name": name,
+                "description": data.get("description", ""),
+                "supported": data.get("supported", []),
+                "depends_on": data.get("depends_on", []),
+                "per_identity": data.get("per_identity", False),
+                "source": "local" if base == LOCAL else "repo",
+            }
+    return list(seen.values())
 
 
 def detect_os_tag() -> str:
@@ -230,7 +257,11 @@ def cmd_list_profiles(_):
 def cmd_resolve(args):
     profile = load_profile(args.profile)
     os_tag = args.os_tag or detect_os_tag()
-    components = resolve_components(profile, os_tag)
+    override = None
+    if args.components is not None:
+        # `--components ""` means "empty list", `--components a,b,c` is the list.
+        override = [c.strip() for c in args.components.split(",") if c.strip()]
+    components = resolve_components(profile, os_tag, override=override)
     identities = [load_identity(n) for n in profile["identities"]]
 
     # Decorate each component with the per-OS script path (if any)
@@ -252,6 +283,26 @@ def cmd_resolve(args):
         "components": plan,
         "identities": identities,
     }, indent=2))
+
+
+def cmd_list_components(args):
+    """List every component for the picker. With --profile, mark which ones
+    are in that profile's explicit list (in_profile=true) and filter to those
+    supported by the current/--os-tag OS.
+    """
+    os_tag = args.os_tag or detect_os_tag()
+    in_profile: set[str] = set()
+    if args.profile:
+        try:
+            in_profile = set(load_profile(args.profile)["components"])
+        except FileNotFoundError as e:
+            sys.exit(f"ERROR: {e}")
+
+    for c in list_all_components():
+        if os_tag not in c["supported"]:
+            continue
+        c["in_profile"] = c["name"] in in_profile
+        print(json.dumps(c))
 
 
 def cmd_identity_env(args):
@@ -283,7 +334,13 @@ def main():
     p_resolve = sub.add_parser("resolve", help="emit JSON plan for a profile")
     p_resolve.add_argument("profile")
     p_resolve.add_argument("--os-tag")
+    p_resolve.add_argument("--components", help="comma-separated override of profile.components")
     p_resolve.set_defaults(func=cmd_resolve)
+
+    p_listc = sub.add_parser("list-components", help="emit one JSON-per-line for each available component")
+    p_listc.add_argument("--profile", help="if given, mark in_profile=true for components in this profile")
+    p_listc.add_argument("--os-tag")
+    p_listc.set_defaults(func=cmd_list_components)
 
     p_ident = sub.add_parser("identity-env", help="emit KEY=value lines for an identity")
     p_ident.add_argument("identity")

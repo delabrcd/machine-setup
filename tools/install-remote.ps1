@@ -43,7 +43,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $repoUrl  = if ($env:MACHINE_SETUP_REPO) { $env:MACHINE_SETUP_REPO } else { "https://github.com/delabrcd/machine-setup.git" }
 $remoteDestLiteral = '$HOME/.local/share/machine-setup'   # expanded on the remote
 
-# ── Validate profile exists locally before we go through the remote dance ───
+# -- Validate profile exists locally before we go through the remote dance ---
 $pythonCmd = Get-Command py, python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $pythonCmd) { throw "python3 not on PATH (try winget install Python.Python.3.13)" }
 
@@ -66,11 +66,11 @@ if ($ProfileName -notin $profileNames) {
     exit 1
 }
 
-# ── Step 1: install git on remote + clone repo ──────────────────────────────
+# -- Step 1: install git on remote + clone repo ------------------------------
 Write-Host "==> [$RemoteHost] Installing git + cloning machine-setup..." -ForegroundColor Cyan
 
 # Bash here-doc piped over ssh stdin. The outer @' '@ is a literal here-string
-# in PowerShell so $variables aren't expanded — bash sees them raw.
+# in PowerShell so $variables aren't expanded -- bash sees them raw.
 $remoteScript = @'
 set -euo pipefail
 
@@ -86,7 +86,7 @@ DEST="$HOME/.local/share/machine-setup"
 mkdir -p "$(dirname "$DEST")"
 if [ -d "$DEST/.git" ]; then
   echo "    Updating $DEST"
-  # Force origin to the public HTTPS URL — handles older checkouts whose
+  # Force origin to the public HTTPS URL -- handles older checkouts whose
   # origin was the (now archived) private SSH URL and would fail to fetch
   # without an SSH key loaded into agent.
   git -C "$DEST" remote set-url origin REPO_URL_PLACEHOLDER
@@ -102,12 +102,12 @@ $remoteScript = $remoteScript.Replace("REPO_URL_PLACEHOLDER", $repoUrl)
 $remoteScript | & ssh $RemoteHost "bash -s"
 if ($LASTEXITCODE -ne 0) { throw "Remote clone step failed (exit $LASTEXITCODE)" }
 
-# ── Step 2: tar-pipe local/ overlay to remote ───────────────────────────────
+# -- Step 2: tar-pipe local/ overlay to remote -------------------------------
 $localDir = Join-Path $repoRoot "local"
 if (Test-Path $localDir) {
     Write-Host "==> [$RemoteHost] Copying local/ overlay..." -ForegroundColor Cyan
 
-    # tar | ssh "tar -xf -"  — bsdtar (System32\tar.exe) handles -cf -.
+    # tar | ssh "tar -xf -"  -- bsdtar (System32\tar.exe) handles -cf -.
     # Run tar from the repo root so paths are stored as `local/...` and untar
     # against $remoteDestLiteral lands them under that repo's local/.
     $tarCmd = "tar -cf - --exclude=local/README.md --exclude=local/.gitkeep local"
@@ -120,10 +120,10 @@ if (Test-Path $localDir) {
         Pop-Location
     }
 } else {
-    Write-Host "    (no local/ on this machine — skipping overlay sync)" -ForegroundColor DarkGray
+    Write-Host "    (no local/ on this machine -- skipping overlay sync)" -ForegroundColor DarkGray
 }
 
-# ── Step 3: run bootstrap.sh on remote with profile pre-set ─────────────────
+# -- Step 3: run bootstrap.sh on remote with profile pre-set -----------------
 Write-Host "==> [$RemoteHost] Running bootstrap with profile=$ProfileName" -ForegroundColor Cyan
 
 $extraArgs = if ($BootstrapArgs) { ($BootstrapArgs -join ' ') } else { "" }

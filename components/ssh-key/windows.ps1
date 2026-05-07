@@ -1,13 +1,13 @@
 . "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
 
 if (-not $env:IDENT_BW_SSH_ITEM) {
-    Write-Log "ssh-key ($($env:IDENT_NAME)): no bw_ssh_item — skipping"
+    Write-Log "ssh-key ($($env:IDENT_NAME)): no bw_ssh_item -- skipping"
     return
 }
 
 $item = Get-BwItemExact $env:IDENT_BW_SSH_ITEM
 if (-not $item) {
-    Write-Warn "ssh-key ($($env:IDENT_NAME)): BW item '$($env:IDENT_BW_SSH_ITEM)' not found — skipping"
+    Write-Warn "ssh-key ($($env:IDENT_NAME)): BW item '$($env:IDENT_BW_SSH_ITEM)' not found -- skipping"
     return
 }
 
@@ -15,7 +15,7 @@ $sshDir = Join-Path $env:USERPROFILE ".ssh"
 if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }
 $pubPath = Join-Path $sshDir "$($env:IDENT_SSH_KEY_BASENAME).pub"
 
-# Public key on disk (no private key — agent only)
+# Public key on disk (no private key -- agent only)
 $pub = Get-BwField $item "public_key"
 if ($pub) {
     Write-LfFile -Path $pubPath -Content $pub
@@ -49,7 +49,7 @@ if ($priv -and $svc -and $svc.Status -eq "Running") {
     }
 }
 
-# ~/.ssh/config — one Host block per applies_to entry, marked with this identity
+# ~/.ssh/config -- one Host block per applies_to entry, marked with this identity
 $homeFwd = Get-HomeForward
 $marker = "# BEGIN machine-setup:$($env:IDENT_NAME)"
 $endMark = "# END machine-setup:$($env:IDENT_NAME)"

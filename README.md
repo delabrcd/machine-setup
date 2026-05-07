@@ -49,21 +49,37 @@ and skip the TUI — handy for VM/CI setups.
 ## Re-runs
 
 ```sh
-bash ~/.local/share/machine-setup/bootstrap.sh                # uses saved profile
-bash ~/.local/share/machine-setup/bootstrap.sh --reconfigure  # re-pick
-MACHINE_SETUP_PROFILE=personal-server bash bootstrap.sh        # scripted override
+bash ~/.local/share/machine-setup/bootstrap.sh                # uses saved profile + components
+bash ~/.local/share/machine-setup/bootstrap.sh --reconfigure  # re-pick both
+bash ~/.local/share/machine-setup/bootstrap.sh --quiet        # use profile defaults, skip component picker
+MACHINE_SETUP_PROFILE=personal-server bash bootstrap.sh        # scripted profile
+MACHINE_SETUP_COMPONENTS=packages,nvm,claude-code bash bootstrap.sh  # scripted component subset
 ```
 
 ```powershell
-& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1"             # uses saved profile
+& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1"             # uses saved choices
 & "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1" -Reconfigure
+& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1" -Quiet
 $env:MACHINE_SETUP_PROFILE = "windows-desktop"
 & "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1"
 ```
 
-The first interactive run saves the chosen profile to
-`~/.config/machine-setup/machine.toml` (or `%USERPROFILE%\.config\...` on
-Windows), so subsequent runs are non-interactive.
+## First-run flow
+
+1. **Profile picker** — pick one of `profiles/*.toml` (or `local/profiles/*.toml`).
+2. **Component picker** — every component supported by the current OS is shown,
+   pre-checked according to the chosen profile. Toggle individual ones on/off.
+   The resolver still pulls in transitive deps automatically — selecting just
+   `claude-code` will quietly pull in `packages`. `--quiet` skips this step
+   and uses the profile's component list as-is.
+3. **Bitwarden unlock** — only happens if any component in the resolved plan
+   actually needs it.
+4. **Run** — components execute in dependency order, per-identity components
+   loop over the profile's identities.
+
+Both choices persist to `~/.config/machine-setup/machine.toml` (or
+`%USERPROFILE%\.config\...` on Windows) — subsequent runs are non-interactive.
+Edit the file, delete it, or pass `--reconfigure` to re-pick.
 
 ## Built-in profiles
 

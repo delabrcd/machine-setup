@@ -41,22 +41,27 @@ fi
 
 # Args ────────────────────────────────────────────────────────────────────────
 RECONFIGURE=0
+QUIET_MODE=0
 for arg in "$@"; do
   case "$arg" in
     --reconfigure|-r) RECONFIGURE=1 ;;
+    --quiet|-q) QUIET_MODE=1 ;;
     --help|-h)
       cat <<USAGE
-Usage: bash bootstrap.sh [--reconfigure]
-  --reconfigure   Re-run the profile picker (otherwise saved choice is used)
+Usage: bash bootstrap.sh [--reconfigure] [--quiet]
+  --reconfigure   Re-run the profile + component pickers (otherwise saved choices are used)
+  --quiet         Skip the component picker on first run; use the profile's component list as-is
 Env:
-  MACHINE_SETUP_PROFILE  Profile name to use (skips TUI)
-  BW_SESSION             Pre-unlocked Bitwarden session (e.g. from WSLENV)
-  BW_PASSWORD            Master password (used for non-interactive unlock)
+  MACHINE_SETUP_PROFILE     Profile name to use (skips profile picker)
+  MACHINE_SETUP_COMPONENTS  Comma-separated component override (skips component picker)
+  BW_SESSION                Pre-unlocked Bitwarden session (e.g. from WSLENV)
+  BW_PASSWORD               Master password (used for non-interactive unlock)
 USAGE
       exit 0
       ;;
   esac
 done
+export QUIET_MODE
 
 step "OS detection"
 OS_TAG=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" os-tag)
@@ -77,8 +82,15 @@ else
 fi
 log "Profile: $PROFILE"
 
+step "Component selection"
+if [ "$RECONFIGURE" = "1" ]; then
+  ui_pick_components_force
+else
+  ui_pick_components
+fi
+
 step "Resolve plan"
-driver_load_plan "$PROFILE"
+driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}"
 log "Components: $(driver_components | paste -sd ' ' -)"
 log "Identities: $(driver_identities | paste -sd ' ' -)"
 

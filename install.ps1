@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $dest = if ($env:MACHINE_SETUP_DIR)  { $env:MACHINE_SETUP_DIR }  else { Join-Path $env:USERPROFILE ".local\share\machine-setup" }
 $repo = if ($env:MACHINE_SETUP_REPO) { $env:MACHINE_SETUP_REPO } else { "https://github.com/delabrcd/machine-setup.git" }
 
-# Install git if missing — needed before we can clone anything.
+# Install git if missing -- needed before we can clone anything.
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "==> Installing Git for Windows via winget..." -ForegroundColor Green

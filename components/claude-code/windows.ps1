@@ -21,5 +21,5 @@ Sync-PathFromRegistry
 if (Get-Command claude -ErrorAction SilentlyContinue) {
     Write-Log "Claude Code: $(claude --version 2>$null)"
 } else {
-    Write-Warn "Claude Code installed but 'claude' not on PATH yet — open a new shell."
+    Write-Warn "Claude Code installed but 'claude' not on PATH yet -- open a new shell."
 }

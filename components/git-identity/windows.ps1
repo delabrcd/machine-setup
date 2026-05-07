@@ -16,7 +16,7 @@ if ($env:IDENT_DEFAULT -eq "1") {
         git config --global user.signingKey $pubPath
     }
 } else {
-    Write-Log "Non-default identity: $($env:IDENT_NAME) — writing .gitconfig-$($env:IDENT_NAME)"
+    Write-Log "Non-default identity: $($env:IDENT_NAME) -- writing .gitconfig-$($env:IDENT_NAME)"
     $confLocal = "$env:USERPROFILE\.gitconfig-$($env:IDENT_NAME)"
     $confFwd   = "$homeFwd/.gitconfig-$($env:IDENT_NAME)"
     $signing = if (Test-Path $pubFile) { "    signingKey = $pubPath`n" } else { "" }
@@ -44,7 +44,7 @@ $signing
         foreach ($pat in @($app.git_url_patterns)) {
             if (-not $pat) { continue }
             git config --global "includeIf.hasconfig:remote.*.url:$pat.path" $confFwd
-            Write-Log "  includeIf: $pat → .gitconfig-$($env:IDENT_NAME)"
+            Write-Log "  includeIf: $pat -> .gitconfig-$($env:IDENT_NAME)"
         }
     }
 }

@@ -10,7 +10,7 @@ git config --global tag.gpgsign true
 
 # Pin git's ssh + ssh-keygen to Windows OpenSSH so they share the agent socket
 # that ssh-add uses (Git for Windows ships its own MSYS2 ssh which uses a
-# different agent socket — signing would fail with "No private key found"
+# different agent socket -- signing would fail with "No private key found"
 # even though the key is loaded in the Windows agent).
 $winSsh    = "C:\Windows\System32\OpenSSH\ssh.exe"
 $winKeygen = "C:\Windows\System32\OpenSSH\ssh-keygen.exe"
