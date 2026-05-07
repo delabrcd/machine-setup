@@ -1,0 +1,11 @@
+name = "wsl-bootstrap"
+description = "From a Windows host, run bootstrap.sh inside WSL with the same profile name. Forwards BW_SESSION + BW_PASSWORD via WSLENV."
+supported = ["windows"]
+depends_on = ["packages"]
+per_identity = false
+
+# Profile config:
+#   [component_config.wsl-bootstrap]
+#   distro = "Ubuntu"             # which WSL distro to dispatch into
+#   profile = "personal-server"   # profile to run inside WSL (defaults to the
+#                                 #   one running on the host)

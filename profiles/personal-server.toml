@@ -1,0 +1,16 @@
+name = "personal-server"
+description = "Headless personal Linux server — packages, Claude Code, personal SSH/git identity"
+
+components = [
+    "packages",
+    "nvm",
+    "bw-cli",
+    "git-base",
+    "git-identity",            # per-identity → runs once for personal
+    "ssh-key",                 # per-identity → personal SSH key from BW
+    "credential-helpers",      # per-identity → GCM for github.com
+    "bw-unlock-shell",
+    "claude-code",
+]
+
+identities = ["personal"]

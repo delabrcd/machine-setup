@@ -1,0 +1,5 @@
+name = "credential-helpers"
+description = "Per-identity HTTPS credential helpers. Reads applies_to[].credential_helper and configures git accordingly: gcm | bitwarden | ssh | none."
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+depends_on = ["packages", "git-base"]
+per_identity = true

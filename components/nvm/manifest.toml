@@ -1,0 +1,5 @@
+name = "nvm"
+description = "nvm + Node.js LTS"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+depends_on = ["packages"]
+per_identity = false

@@ -1,0 +1,5 @@
+name = "ssh-key"
+description = "Per-identity SSH key: restored from Bitwarden, or generated + stored. Private key lives only in BW + ssh-agent memory."
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+depends_on = ["bw-cli", "git-base"]
+per_identity = true

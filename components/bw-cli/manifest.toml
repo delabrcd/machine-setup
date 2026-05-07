@@ -1,0 +1,7 @@
+name = "bw-cli"
+description = "Bitwarden CLI (used by ssh-key, credential helpers, secrets components)"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+# nvm dep is for the Linux npm-fallback path; on Windows nvm is filtered out
+# of the plan (it's not in nvm's supported list) and bw-cli installs via winget.
+depends_on = ["nvm"]
+per_identity = false

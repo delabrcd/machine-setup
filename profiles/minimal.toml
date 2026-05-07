@@ -1,0 +1,12 @@
+name = "minimal"
+description = "Headless server, no Bitwarden — just base packages + Claude Code"
+
+# No identities → nothing in the profile asks for SSH keys or git identity.
+# Claude Code gets installed but no chezmoi config is applied (since we
+# didn't include the chezmoi component).
+components = [
+    "packages",
+    "claude-code",
+]
+
+identities = []

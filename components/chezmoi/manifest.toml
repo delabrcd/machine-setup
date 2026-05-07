@@ -1,0 +1,11 @@
+name = "chezmoi"
+description = "chezmoi-managed dotfiles (e.g. Claude Code config)"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+depends_on = ["claude-code"]
+per_identity = false
+
+# The driver makes profile-level [component_config.chezmoi] available to the
+# script via the COMPONENT_CONFIG_JSON env var. Recognised keys:
+#   repo            = "https://github.com/USER/dotfiles.git"  (required)
+#   reset_entry_key = "/home/x/register-mcp-servers.sh"       (optional;
+#                     forces re-run of the matching run_onchange_ script)

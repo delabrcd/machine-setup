@@ -1,0 +1,5 @@
+name = "bw-unlock-shell"
+description = "Install bw-unlock shell function (sources every SSH key declared by profile identities)."
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+depends_on = ["bw-cli"]
+per_identity = false

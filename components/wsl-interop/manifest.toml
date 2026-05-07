@@ -1,0 +1,5 @@
+name = "wsl-interop"
+description = "Restore WSLInterop binfmt registration so .exe interop works (WSL only)"
+supported = ["wsl"]
+depends_on = []
+per_identity = false

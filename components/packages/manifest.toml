@@ -1,0 +1,5 @@
+name = "packages"
+description = "Base system packages (git, curl, python3, build tools, gh CLI)"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+depends_on = []
+per_identity = false

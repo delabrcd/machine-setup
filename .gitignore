@@ -1,0 +1,12 @@
+.DS_Store
+*.swp
+
+# Per-host overlay: private profiles/identities (work configs, employer names,
+# private repo URLs, etc.). The bootstrap merges everything in local/ on top of
+# the in-repo defaults so the public repo never carries employer-specific data.
+/local/**
+!/local/README.md
+!/local/.gitkeep
+
+# Claude Code per-project local settings
+.claude/settings.local.json

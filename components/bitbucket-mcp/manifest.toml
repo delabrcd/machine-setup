@@ -1,0 +1,9 @@
+name = "bitbucket-mcp"
+description = "npm install + npm run build inside a directory containing an MCP server (defaults to dev-utilities/bitbucket-mcp)."
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+depends_on = ["nvm", "dev-utilities"]
+per_identity = false
+
+# Profile config:
+#   [component_config.bitbucket-mcp]
+#   path = "~/.local/share/dev-utilities/bitbucket-mcp"   # default shown

@@ -1,0 +1,5 @@
+name = "uv"
+description = "uv (Astral) — Python package runner; required by uvx-based MCPs"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+depends_on = []
+per_identity = false

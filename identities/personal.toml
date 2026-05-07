@@ -1,0 +1,30 @@
+# Personal identity — public, lives in the repo. Edit to your own GitHub
+# username/email, or fork.
+
+name = "personal"
+git_name = "delabrcd"
+git_email = "36674601+delabrcd@users.noreply.github.com"
+
+# Bitwarden item that holds (or will hold) the SSH private+public key. Omit
+# this line and the ssh-key component will skip this identity entirely (e.g.
+# for headless servers that auth to GitHub via gh CLI / a deploy key).
+bw_ssh_item = "Machine SSH Key"
+ssh_key_basename = "id_ed25519_personal"
+
+# Mark exactly one identity per profile as default — its name/email/signing
+# key go to the global git config. Non-default identities are scoped via
+# includeIf rules built from `git_url_patterns` below.
+default = true
+
+[[applies_to]]
+host = "github.com"
+git_url_patterns = [
+    "git@github.com:*/*",
+    "https://github.com/*/*",
+]
+# Personal default: SSH-only. The ssh-key component installs the Bitwarden-
+# stored key into ssh-agent, and `git clone git@github.com:...` Just Works.
+# (Switch to credential_helper = "gcm" if you want HTTPS clones via OAuth.)
+credential_helper = "ssh"
+register_url = "https://github.com/settings/ssh/new"
+register_label = "GitHub (Authentication + Signing key)"
