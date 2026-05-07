@@ -64,11 +64,14 @@ if (Get-Command bw -ErrorAction SilentlyContinue) {
     Write-Log "bw CLI not installed yet -- skipping early unlock"
 }
 
-Write-Step "BW profile discovery"
+Write-Step "BW discovery"
 $script:BwCacheDir = Join-Path $env:TEMP ("machine-setup-bw-{0}" -f $PID)
 if (-not (Test-Path $script:BwCacheDir)) { New-Item -ItemType Directory -Force -Path $script:BwCacheDir | Out-Null }
 Find-BwProfiles -CacheDir $script:BwCacheDir
-$env:MACHINE_SETUP_BW_CACHE_DIR = $script:BwCacheDir
+$script:IdentityRegistryFile = Join-Path $script:BwCacheDir "identities.json"
+Find-BwIdentities -RegistryPath $script:IdentityRegistryFile | Out-Null
+$env:MACHINE_SETUP_BW_CACHE_DIR        = $script:BwCacheDir
+$env:MACHINE_SETUP_IDENTITY_REGISTRY   = $script:IdentityRegistryFile
 
 # Profile selection ----------------------------------------------------------
 Write-Step "Profile selection"
@@ -80,22 +83,13 @@ Write-Step "Component selection"
 $componentsOverride = Select-Components -ProfileName $profileName -OsTag $osTag `
     -Force:$Reconfigure -Quiet:$Quiet
 
-# Pre-load plan with profile defaults so we can decide whether to unlock BW
-Write-Step "Resolve plan (initial)"
-$script:Plan = Resolve-Plan -ProfileName $profileName -OsTag $osTag -Components $componentsOverride
-Write-Log ("Components: " + (($script:Plan.components | ForEach-Object { $_.name }) -join " "))
-
-# Identity discovery (BW already unlocked above) -----------------------------
-Write-Step "Identity discovery"
-$script:IdentityRegistryFile = Join-Path $script:BwCacheDir "identities.json"
-Find-BwIdentities -RegistryPath $script:IdentityRegistryFile | Out-Null
-$env:MACHINE_SETUP_IDENTITY_REGISTRY = $script:IdentityRegistryFile
-
+# Identity selection ---------------------------------------------------------
 Write-Step "Identity selection"
 $identitiesOverride = Select-Identities -ProfileName $profileName -Force:$Reconfigure -Quiet:$Quiet
 
-# Re-resolve plan with chosen identities -------------------------------------
-Write-Step "Resolve plan (final)"
+# Single resolve once everything is chosen. Registry was populated above, so
+# identities resolve cleanly without a separate "initial" pass.
+Write-Step "Resolve plan"
 $script:Plan = Resolve-Plan -ProfileName $profileName -OsTag $osTag `
     -Components $componentsOverride -Identities $identitiesOverride
 Write-Log ("Components: " + (($script:Plan.components | ForEach-Object { $_.name }) -join " "))

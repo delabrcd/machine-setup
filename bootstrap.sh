@@ -86,17 +86,23 @@ else
   log "bw CLI not installed yet — skipping early unlock (a profile that lists 'bw-cli' will install it on first run, then re-run for BW-stored profiles)."
 fi
 
-# Discover BW-stored profiles into a cache dir. config.py reads
-# MACHINE_SETUP_BW_CACHE_DIR and treats it as a third overlay layer
-# (between local/ and repo/) for profile lookups.
-step "BW profile discovery"
+# Discover BW-stored profiles + identities into a cache dir. Both run BEFORE
+# any picker so the resolver and the picker UI both see the live BW state.
+# config.py reads:
+#   MACHINE_SETUP_BW_CACHE_DIR        — extra profile search root (BW-stored)
+#   MACHINE_SETUP_IDENTITY_REGISTRY   — JSON map of BW-discovered identities
+step "BW discovery"
 BW_CACHE_DIR="${TMPDIR:-/tmp}/machine-setup-bw-$$"
-trap 'rm -rf "$BW_CACHE_DIR" "${IDENTITY_REGISTRY_FILE:-}"' EXIT
+trap 'rm -rf "$BW_CACHE_DIR"' EXIT
 mkdir -p "$BW_CACHE_DIR/profiles"
+IDENTITY_REGISTRY_FILE="$BW_CACHE_DIR/identities.json"
+echo '{}' > "$IDENTITY_REGISTRY_FILE"
 if check_bw_session 2>/dev/null; then
-  bw_discover_profiles "$BW_CACHE_DIR" || true
+  bw_discover_profiles   "$BW_CACHE_DIR"            || true
+  bw_discover_identities "$IDENTITY_REGISTRY_FILE"  || true
 fi
 export MACHINE_SETUP_BW_CACHE_DIR="$BW_CACHE_DIR"
+export MACHINE_SETUP_IDENTITY_REGISTRY="$IDENTITY_REGISTRY_FILE"
 
 step "Profile selection"
 if [ "$RECONFIGURE" = "1" ]; then
@@ -113,21 +119,6 @@ else
   ui_pick_components
 fi
 
-# Pre-load plan with profile defaults
-step "Resolve plan (initial)"
-driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}"
-log "Components: $(driver_components | paste -sd ' ' -)"
-
-# Discover identities from BW into a registry file (BW already unlocked above)
-step "Identity discovery"
-IDENTITY_REGISTRY_FILE="$BW_CACHE_DIR/identities.json"
-if check_bw_session 2>/dev/null; then
-  bw_discover_identities "$IDENTITY_REGISTRY_FILE" || true
-else
-  echo '{}' > "$IDENTITY_REGISTRY_FILE"
-fi
-export MACHINE_SETUP_IDENTITY_REGISTRY="$IDENTITY_REGISTRY_FILE"
-
 step "Identity selection"
 if [ "$RECONFIGURE" = "1" ]; then
   ui_pick_identities_force
@@ -135,8 +126,10 @@ else
   ui_pick_identities
 fi
 
-# Re-resolve plan with the chosen identities folded in ───────────────────────
-step "Resolve plan (final)"
+# Single resolve once profile + components + identities are all chosen. The
+# registry was populated up in BW discovery, so identities load from BW (or
+# fall back to local/identities/<name>.toml) without a second pass.
+step "Resolve plan"
 driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}" "${IDENTITIES_OVERRIDE:-}"
 log "Components: $(driver_components | paste -sd ' ' -)"
 log "Identities: $(driver_identities | paste -sd ' ' -)"
