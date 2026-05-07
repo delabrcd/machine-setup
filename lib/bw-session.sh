@@ -37,19 +37,32 @@ bw_session_unlock() {
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unauthenticated'))" \
     2>/dev/null || echo unauthenticated)
 
+  # bw's interactive prompts read from stdin — when the bootstrap was launched
+  # via `curl | bash`, stdin is the (now-EOF) curl pipe. Redirect from
+  # /dev/tty so bw login/unlock can actually prompt.
+  local tty_in=""
+  [ -r /dev/tty ] && tty_in="/dev/tty"
+
   if [ "$status" = "unauthenticated" ]; then
     log "Logging in to Bitwarden..."
-    bw login || { warn "Bitwarden login failed — BW-dependent components will be skipped"; return 1; }
+    if [ -n "$tty_in" ]; then
+      bw login < "$tty_in" || { warn "Bitwarden login failed — BW-dependent components will be skipped"; return 1; }
+    else
+      bw login || { warn "Bitwarden login failed (no /dev/tty for prompt)"; return 1; }
+    fi
   fi
 
   if [ -n "${BW_PASSWORD:-}" ]; then
     log "Unlocking Bitwarden vault (BW_PASSWORD from environment)..."
     BW_SESSION=$(bw unlock --passwordenv BW_PASSWORD --raw) || \
       { warn "Bitwarden unlock failed"; return 1; }
-  else
+  elif [ -n "$tty_in" ]; then
     log "Unlocking Bitwarden vault (enter master password)..."
-    BW_SESSION=$(bw unlock --raw) || \
+    BW_SESSION=$(bw unlock --raw < "$tty_in") || \
       { warn "Bitwarden unlock failed"; return 1; }
+  else
+    warn "No /dev/tty and no BW_PASSWORD set — cannot unlock vault non-interactively"
+    return 1
   fi
   export BW_SESSION
 

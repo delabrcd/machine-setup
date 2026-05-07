@@ -63,7 +63,7 @@ _ui_prompt_profile() {
     fi
   done <<< "$profiles_json"
 
-  if command -v whiptail >/dev/null 2>&1 && [ -t 0 ]; then
+  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
     _ui_whiptail_radio_profile names labels
   else
     _ui_select_fallback_profile names labels
@@ -76,16 +76,25 @@ _ui_whiptail_radio_profile() {
   for i in "${!_names[@]}"; do
     args+=("${_names[$i]}" "${_labels[$i]}")
   done
+  # `< /dev/tty` so whiptail can read keystrokes even when our own stdin is
+  # a closed curl-pipe (the curl | bash invocation pattern).
   PROFILE=$(whiptail \
     --title "machine-setup" \
     --menu "Pick a profile for this machine:" \
     20 78 10 \
     "${args[@]}" \
-    3>&1 1>&2 2>&3) || return 1
+    3>&1 1>&2 2>&3 < /dev/tty) || return 1
 }
 
 _ui_select_fallback_profile() {
   local -n _names=$1 _labels=$2
+  # When the script was piped in (curl | bash), bash's stdin is the script
+  # itself and is at EOF by the time we get here. Read from /dev/tty so the
+  # prompt works regardless of how the script was invoked. If there's no
+  # tty either (truly headless), error out instead of spinning forever on
+  # empty input.
+  [ -r /dev/tty ] || die "No /dev/tty available — cannot prompt. Set MACHINE_SETUP_PROFILE=<name> to skip the picker."
+
   echo ""
   echo "Pick a profile for this machine:"
   echo ""
@@ -96,12 +105,15 @@ _ui_select_fallback_profile() {
   done
   echo ""
   while :; do
-    read -r -p "Enter number (1-${#_names[@]}): " choice
+    printf "Enter number (1-%d): " "${#_names[@]}" > /dev/tty
+    if ! read -r choice < /dev/tty; then
+      die "tty closed — cannot read profile choice"
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#_names[@]}" ]; then
       PROFILE="${_names[$((choice - 1))]}"
       return 0
     fi
-    echo "Invalid choice."
+    echo "Invalid choice." > /dev/tty
   done
 }
 
@@ -162,7 +174,7 @@ _ui_prompt_components() {
     return 1
   fi
 
-  if command -v whiptail >/dev/null 2>&1 && [ -t 0 ]; then
+  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
     _ui_whiptail_checklist names descs defaults
   else
     _ui_toggle_fallback names descs defaults
@@ -175,19 +187,17 @@ _ui_whiptail_checklist() {
   for i in "${!_names[@]}"; do
     local on="OFF"
     [ "${_defaults[$i]}" = "1" ] && on="ON"
-    # Truncate description to keep the box readable (~50 chars width)
     local d="${_descs[$i]}"
     [ "${#d}" -gt 50 ] && d="${d:0:47}..."
     args+=("${_names[$i]}" "$d" "$on")
   done
   local picked
   picked=$(whiptail \
-    --title "machine-setup — components for profile '$PROFILE'" \
+    --title "machine-setup -- components for profile '$PROFILE'" \
     --checklist "Toggle components with SPACE; ENTER to confirm.\nDeps are auto-pulled in by the resolver." \
     22 80 14 \
     "${args[@]}" \
-    3>&1 1>&2 2>&3) || return 1
-  # whiptail emits names quoted ("a" "b" "c"); convert to comma-separated
+    3>&1 1>&2 2>&3 < /dev/tty) || return 1
   COMPONENTS_OVERRIDE=$(printf '%s' "$picked" | sed 's/"//g' | tr ' ' ',')
 }
 
@@ -195,25 +205,32 @@ _ui_toggle_fallback() {
   local -n _names=$1 _descs=$2 _defaults=$3
   local -a sel=("${_defaults[@]}")  # copy
 
+  # Same /dev/tty rationale as _ui_select_fallback_profile.
+  [ -r /dev/tty ] || die "No /dev/tty available — cannot prompt. Set MACHINE_SETUP_COMPONENTS=<csv> or use --quiet."
+
   while :; do
-    echo ""
-    echo "Components — toggle with numbers (e.g. 3 5 7), or ENTER to confirm:"
-    echo ""
+    echo "" > /dev/tty
+    echo "Components for profile '$PROFILE' — toggle with numbers (e.g. 3 5 7), or ENTER to confirm:" > /dev/tty
+    echo "" > /dev/tty
     local i
     for i in "${!_names[@]}"; do
       local mark="[ ]"
       [ "${sel[$i]}" = "1" ] && mark="[x]"
-      printf "  %2d) %s %-25s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}"
+      printf "  %2d) %s %-25s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
     done
-    echo ""
-    read -r -p "> " input
+    echo "" > /dev/tty
+    printf "> " > /dev/tty
+    local input
+    if ! read -r input < /dev/tty; then
+      die "tty closed — cannot read component selection"
+    fi
     [ -z "$input" ] && break
     for tok in $input; do
       if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#_names[@]}" ]; then
         local idx=$((tok - 1))
         if [ "${sel[$idx]}" = "1" ]; then sel[$idx]=0; else sel[$idx]=1; fi
       else
-        echo "  ignored: $tok"
+        echo "  ignored: $tok" > /dev/tty
       fi
     done
   done
