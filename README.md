@@ -17,10 +17,17 @@ components/<name>/
     manifest.toml                # name, supported OSes, deps, per_identity flag
     linux.sh                     # Linux/WSL implementation (optional)
     windows.ps1                  # Windows implementation (optional)
-local/                           # gitignored overlay — your private bindings
-    profiles/<name>.toml         # repo URLs, chezmoi.repo, pinned identities
+local/                           # gitignored overlay — per-machine private bindings
+    profiles/<name>.toml         # OPTIONAL — overrides BW-stored profile of same name
     identities/<name>.toml       # OPTIONAL — TOML fallback if you don't use BW
+
+Bitwarden                        # cross-machine sync, no manual file copy
+    "Machine Profile: <name>"    # Secure Note whose body is the profile TOML
+    "Machine Identity: <name>"   # SSH key + git_name/email/applies_to fields
 ```
+
+**Profile precedence at lookup time:** `local/` > Bitwarden > `repo/`. So
+on-disk overrides win even if a BW profile by the same name exists.
 
 **Identities live in Bitwarden.** Each identity is a BW item named
 `Machine Identity: <name>` with these fields:
@@ -218,6 +225,32 @@ storage), and the temp file is immediately deleted.
 The `ssh-key` component also auto-generates a fresh ed25519 key the
 first time it can't find a BW item for an identity, then stores it back
 in BW — same flow as before.
+
+## Storing profiles in Bitwarden (one-command remote setup)
+
+If you keep your private profiles (`work-desktop`, etc.) in Bitwarden,
+a fresh machine just needs the public one-liner — bootstrap unlocks BW,
+discovers the profile, and shows it in the picker. No manual file copy.
+
+```sh
+# Push a local profile to Bitwarden (one-time, from any existing machine):
+export BW_SESSION="$(bw unlock --raw)"
+./tools/seed-bw-profile.sh push local/profiles/work-desktop.toml
+
+# List what's in BW:
+./tools/seed-bw-profile.sh list
+
+# Pull (e.g. to edit locally and push back):
+./tools/seed-bw-profile.sh pull work-desktop > /tmp/work.toml
+$EDITOR /tmp/work.toml
+./tools/seed-bw-profile.sh push /tmp/work.toml
+```
+
+PowerShell equivalents at `tools\seed-bw-profile.ps1`.
+
+The bootstrap creates BW Secure Notes named `Machine Profile: <name>`
+with the TOML content as the note body — you can also create/edit them
+through the BW web UI directly.
 
 ## Per-profile identity overrides
 

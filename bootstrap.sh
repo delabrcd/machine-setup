@@ -67,12 +67,31 @@ step "OS detection"
 OS_TAG=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" os-tag)
 log "OS tag: $OS_TAG"
 
-# WSL needs interop early so the GCM bridge works. Components can also run
-# this via the wsl-interop component, but doing it here means it's available
-# to any subsequent step regardless of profile composition.
 if [ "$OS_TAG" = "wsl" ]; then
   ensure_wsl_interop || warn "WSL interop fix failed — Windows .exe interop disabled"
 fi
+
+# Bitwarden unlock — early, so BW-stored profiles + identities can populate
+# the picker. If unlock fails or is skipped, fall back to public profiles
+# only. BW_PASSWORD or BW_SESSION in env makes this non-interactive.
+step "Bitwarden session (early)"
+if command -v bw >/dev/null 2>&1; then
+  bw_session_unlock || warn "BW unlock failed — continuing with public profiles only"
+else
+  log "bw CLI not installed yet — skipping early unlock (a profile that lists 'bw-cli' will install it on first run, then re-run for BW-stored profiles)."
+fi
+
+# Discover BW-stored profiles into a cache dir. config.py reads
+# MACHINE_SETUP_BW_CACHE_DIR and treats it as a third overlay layer
+# (between local/ and repo/) for profile lookups.
+step "BW profile discovery"
+BW_CACHE_DIR="${TMPDIR:-/tmp}/machine-setup-bw-$$"
+trap 'rm -rf "$BW_CACHE_DIR" "${IDENTITY_REGISTRY_FILE:-}"' EXIT
+mkdir -p "$BW_CACHE_DIR/profiles"
+if check_bw_session 2>/dev/null; then
+  bw_discover_profiles "$BW_CACHE_DIR" || true
+fi
+export MACHINE_SETUP_BW_CACHE_DIR="$BW_CACHE_DIR"
 
 step "Profile selection"
 if [ "$RECONFIGURE" = "1" ]; then
@@ -89,33 +108,14 @@ else
   ui_pick_components
 fi
 
-# Pre-load plan with whatever identities the profile names — used to decide
-# whether we need to unlock Bitwarden before discovering identities.
+# Pre-load plan with profile defaults
 step "Resolve plan (initial)"
 driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}"
 log "Components: $(driver_components | paste -sd ' ' -)"
 
-# Bitwarden unlock + identity discovery ───────────────────────────────────────
-# Reasons we might need BW now:
-#   - profile/local/identities/<x>.toml says bw_ssh_item / bitwarden helper
-#   - identity picker wants to discover "Machine Identity: *" items
-# If the profile pre-pins identities AND none of them need BW, skip unlock.
-step "Bitwarden session"
-NEED_BW_FOR_DISCOVERY=1   # always try to discover unless quiet+no-identities
-if [ "${QUIET_MODE:-0}" = "1" ] && ! bw_session_required; then
-  NEED_BW_FOR_DISCOVERY=0
-fi
-if bw_session_required || [ "$NEED_BW_FOR_DISCOVERY" = "1" ]; then
-  bw_session_unlock || warn "BW unlock failed — identity discovery + BW components will be skipped"
-else
-  log "No BW-using component in this profile — skipping unlock."
-fi
-
-# Discover identities from BW into a registry file. config.py reads
-# MACHINE_SETUP_IDENTITY_REGISTRY for any name not present in TOML files.
+# Discover identities from BW into a registry file (BW already unlocked above)
 step "Identity discovery"
-IDENTITY_REGISTRY_FILE="${TMPDIR:-/tmp}/machine-setup-identities-$$.json"
-trap 'rm -f "$IDENTITY_REGISTRY_FILE"' EXIT
+IDENTITY_REGISTRY_FILE="$BW_CACHE_DIR/identities.json"
 if check_bw_session 2>/dev/null; then
   bw_discover_identities "$IDENTITY_REGISTRY_FILE" || true
 else

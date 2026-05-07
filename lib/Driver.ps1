@@ -52,6 +52,44 @@ function Resolve-Plan {
     return ($json -join "`n") | ConvertFrom-Json
 }
 
+# Scan BW for "Machine Profile: *" items, write each item's notes (TOML body)
+# to <CacheDir>\profiles\<name>.toml so config.py picks them up.
+function Find-BwProfiles {
+    param([string]$CacheDir)
+    $profilesDir = Join-Path $CacheDir "profiles"
+    if (-not (Test-Path $profilesDir)) { New-Item -ItemType Directory -Force -Path $profilesDir | Out-Null }
+
+    if (-not (Get-Command bw -ErrorAction SilentlyContinue)) {
+        Write-Warn "bw not installed; skipping BW profile discovery"
+        return
+    }
+    if (-not $env:BW_SESSION) {
+        Write-Warn "BW_SESSION not set; skipping BW profile discovery"
+        return
+    }
+
+    $itemsJson = & { $ErrorActionPreference = "Continue"; bw list items 2>$null }
+    if (-not $itemsJson) { return }
+    $items = @($itemsJson | ConvertFrom-Json)
+
+    $prefix = "Machine Profile: "
+    $count = 0
+    foreach ($item in $items) {
+        if (-not $item.name) { continue }
+        if (-not $item.name.StartsWith($prefix)) { continue }
+        $profileName = $item.name.Substring($prefix.Length).Trim()
+        if (-not $profileName) { continue }
+        if ($profileName -notmatch '^[A-Za-z0-9_-]+$') { continue }
+        $body = ($item.notes -as [string])
+        if (-not $body) { continue }
+        $body = $body.Trim() + "`n"
+        $path = Join-Path $profilesDir "$profileName.toml"
+        Set-Content -Path $path -Value $body -Encoding utf8
+        $count++
+    }
+    Write-Host "  Discovered $count profile item(s) in Bitwarden" -ForegroundColor DarkGray
+}
+
 # Scan BW for "Machine Identity: *" items and write a registry JSON file.
 # Returns the path. Writes "{}" if BW unavailable.
 function Find-BwIdentities {

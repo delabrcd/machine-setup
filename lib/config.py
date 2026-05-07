@@ -63,18 +63,43 @@ REPO = Path(__file__).resolve().parent.parent
 LOCAL = REPO / "local"
 
 
+def _bw_cache_dir() -> Path | None:
+    """Runtime cache where the bootstrap drops BW-discovered profiles.
+    Treated as a third overlay layer between local/ and repo/.
+    """
+    p = os.environ.get("MACHINE_SETUP_BW_CACHE_DIR")
+    return Path(p) if p else None
+
+
+def _profile_search_bases() -> list[tuple[Path, str]]:
+    """Search bases for profiles, in precedence order. Returns (path, label)."""
+    bases: list[tuple[Path, str]] = [(LOCAL, "local")]
+    bw = _bw_cache_dir()
+    if bw is not None:
+        bases.append((bw, "bitwarden"))
+    bases.append((REPO, "repo"))
+    return bases
+
+
 def _load_toml(path: Path) -> dict:
     with path.open("rb") as f:
         return tomllib.load(f)
 
 
 def _resolve(kind: str, name: str) -> Path:
-    """Find <kind>/<name>.toml — local/ overrides repo root."""
-    for base in (LOCAL, REPO):
+    """Find <kind>/<name>.toml in overlays. Precedence:
+       local/ > BW-cache (profiles only) > repo/
+    """
+    bases: list[Path]
+    if kind == "profiles":
+        bases = [b[0] for b in _profile_search_bases()]
+    else:
+        bases = [LOCAL, REPO]
+    for base in bases:
         candidate = base / kind / f"{name}.toml"
         if candidate.exists():
             return candidate
-    raise FileNotFoundError(f"{kind}/{name}.toml not found in local/ or repo")
+    raise FileNotFoundError(f"{kind}/{name}.toml not found in any overlay")
 
 
 def _resolve_component(name: str) -> Path:
@@ -106,9 +131,12 @@ def component_script_path(name: str, kind: str) -> Path | None:
 
 
 def list_profiles() -> list[dict]:
-    """All profiles known across local/ + repo, deduped (local wins by name)."""
+    """All profiles known across overlays, deduped by name in precedence
+    order (local wins over BW-cache wins over repo)."""
     seen: dict[str, dict] = {}
-    for base in (REPO, LOCAL):  # repo first so local overrides
+    # Walk in REVERSE precedence so high-precedence layers overwrite the dict
+    bases = list(reversed(_profile_search_bases()))
+    for base, label in bases:
         d = base / "profiles"
         if not d.is_dir():
             continue
@@ -118,7 +146,7 @@ def list_profiles() -> list[dict]:
             seen[name] = {
                 "name": name,
                 "description": data.get("description", ""),
-                "source": "local" if base == LOCAL else "repo",
+                "source": label,
             }
     return list(seen.values())
 

@@ -54,6 +54,22 @@ Write-Step "OS detection"
 $osTag = Get-OsTag
 Write-Log "OS tag: $osTag"
 
+# Bitwarden unlock + BW profile discovery (early, so the picker sees them) ---
+Write-Step "Bitwarden session (early)"
+if (Get-Command bw -ErrorAction SilentlyContinue) {
+    if (-not (Unlock-BwSession)) {
+        Write-Warn "BW unlock failed -- continuing with public profiles only"
+    }
+} else {
+    Write-Log "bw CLI not installed yet -- skipping early unlock"
+}
+
+Write-Step "BW profile discovery"
+$script:BwCacheDir = Join-Path $env:TEMP ("machine-setup-bw-{0}" -f $PID)
+if (-not (Test-Path $script:BwCacheDir)) { New-Item -ItemType Directory -Force -Path $script:BwCacheDir | Out-Null }
+Find-BwProfiles -CacheDir $script:BwCacheDir
+$env:MACHINE_SETUP_BW_CACHE_DIR = $script:BwCacheDir
+
 # Profile selection ----------------------------------------------------------
 Write-Step "Profile selection"
 $profileName = Select-Profile -Force:$Reconfigure
@@ -69,19 +85,9 @@ Write-Step "Resolve plan (initial)"
 $script:Plan = Resolve-Plan -ProfileName $profileName -OsTag $osTag -Components $componentsOverride
 Write-Log ("Components: " + (($script:Plan.components | ForEach-Object { $_.name }) -join " "))
 
-# Bitwarden session + identity discovery -------------------------------------
-Write-Step "Bitwarden session"
-$needBw = (Test-BwSessionRequired -Plan $script:Plan) -or (-not $Quiet)
-if ($needBw) {
-    if (-not (Unlock-BwSession)) {
-        Write-Warn "BW unlock failed -- identity discovery + BW components will be skipped"
-    }
-} else {
-    Write-Log "No BW-using component in this profile -- skipping unlock."
-}
-
+# Identity discovery (BW already unlocked above) -----------------------------
 Write-Step "Identity discovery"
-$script:IdentityRegistryFile = Join-Path $env:TEMP ("machine-setup-identities-{0}.json" -f $PID)
+$script:IdentityRegistryFile = Join-Path $script:BwCacheDir "identities.json"
 Find-BwIdentities -RegistryPath $script:IdentityRegistryFile | Out-Null
 $env:MACHINE_SETUP_IDENTITY_REGISTRY = $script:IdentityRegistryFile
 
@@ -99,9 +105,9 @@ Write-Log ("Identities: " + (($script:Plan.identities | ForEach-Object { $_.name
 Invoke-Plan -Plan $script:Plan
 Write-Summary
 
-# Cleanup identity registry temp file ----------------------------------------
-if ($script:IdentityRegistryFile -and (Test-Path $script:IdentityRegistryFile)) {
-    Remove-Item -Force $script:IdentityRegistryFile -ErrorAction SilentlyContinue
+# Cleanup BW cache dir (identities + profiles) -------------------------------
+if ($script:BwCacheDir -and (Test-Path $script:BwCacheDir)) {
+    Remove-Item -Recurse -Force $script:BwCacheDir -ErrorAction SilentlyContinue
 }
 
 # Cleanup --------------------------------------------------------------------

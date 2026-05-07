@@ -93,6 +93,45 @@ print(next((f['value'] for f in d.get('fields', []) if f.get('name') == '$field'
 "
 }
 
+# Discover profiles stored in Bitwarden. A profile is a BW Secure Note whose
+# name begins with "Machine Profile: " — the suffix is the profile name. The
+# note body (the textarea, not custom fields) holds the TOML content.
+#
+# Writes each profile body to <cache_dir>/profiles/<name>.toml. The bootstrap
+# then sets MACHINE_SETUP_BW_CACHE_DIR=<cache_dir> so config.py picks them up
+# in the profile picker.
+bw_discover_profiles() {
+  local cache_dir="$1"
+  local profiles_dir="$cache_dir/profiles"
+  mkdir -p "$profiles_dir"
+
+  command -v bw >/dev/null 2>&1 || { warn "bw not installed; skipping BW profile discovery"; return 1; }
+  check_bw_session 2>/dev/null || { warn "BW session not active; skipping discovery"; return 1; }
+
+  bw list items 2>/dev/null | python3 - "$profiles_dir" <<'PY'
+import sys, json, os, re
+profiles_dir = sys.argv[1]
+prefix = "Machine Profile: "
+items = json.load(sys.stdin)
+count = 0
+for item in items:
+    name = item.get("name", "")
+    if not name.startswith(prefix):
+        continue
+    profile_name = name[len(prefix):].strip()
+    if not profile_name or not re.fullmatch(r'[A-Za-z0-9_-]+', profile_name):
+        continue
+    body = (item.get("notes") or "").strip()
+    if not body:
+        continue
+    path = os.path.join(profiles_dir, f"{profile_name}.toml")
+    with open(path, "w") as f:
+        f.write(body + "\n")
+    count += 1
+print(f"  Discovered {count} profile item(s) in Bitwarden", file=sys.stderr)
+PY
+}
+
 # Discover identities stored in Bitwarden. An identity is a BW item whose name
 # begins with "Machine Identity: " — the suffix is the identity name. The item
 # carries custom fields:
