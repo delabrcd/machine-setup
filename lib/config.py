@@ -399,7 +399,18 @@ def cmd_resolve(args):
         identity_names = [n.strip() for n in args.identities.split(",") if n.strip()]
     else:
         identity_names = profile["identities"]
-    identities = [load_identity(n) for n in identity_names]
+
+    # Skip identities that aren't in the registry or any TOML file. Common when
+    # a saved selection lists names that were renamed/deleted, or when BW
+    # discovery failed and the saved name no longer resolves. Crashing the
+    # whole bootstrap over a stale selection is worse than dropping the
+    # identity and letting per-identity components no-op for that name.
+    identities = []
+    for n in identity_names:
+        try:
+            identities.append(load_identity(n))
+        except FileNotFoundError:
+            print(f"  WARN: identity '{n}' not found in registry or TOML — skipping", file=sys.stderr)
 
     # Apply per-identity overrides from the profile (e.g. force credential_helper
     # = "gcm" for personal/github.com on a work-desktop profile).

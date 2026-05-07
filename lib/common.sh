@@ -108,11 +108,21 @@ bw_discover_profiles() {
   command -v bw >/dev/null 2>&1 || { warn "bw not installed; skipping BW profile discovery"; return 1; }
   check_bw_session 2>/dev/null || { warn "BW session not active; skipping discovery"; return 1; }
 
-  bw list items 2>/dev/null | python3 - "$profiles_dir" <<'PY'
+  local items_json
+  if ! items_json=$(bw list items 2>/dev/null) || [ -z "$items_json" ]; then
+    warn "bw list items returned empty/error; skipping profile discovery"
+    return 1
+  fi
+
+  printf '%s' "$items_json" | python3 - "$profiles_dir" <<'PY'
 import sys, json, os, re
 profiles_dir = sys.argv[1]
 prefix = "Machine Profile: "
-items = json.load(sys.stdin)
+try:
+    items = json.load(sys.stdin)
+except json.JSONDecodeError:
+    print("  WARN: bw list items returned non-JSON output; skipping profile discovery", file=sys.stderr)
+    sys.exit(0)
 count = 0
 for item in items:
     name = item.get("name", "")
@@ -147,11 +157,24 @@ bw_discover_identities() {
   command -v bw >/dev/null 2>&1 || { warn "bw not installed; skipping BW identity discovery"; echo '{}' > "$out"; return 1; }
   check_bw_session 2>/dev/null || { warn "BW session not active; skipping discovery"; echo '{}' > "$out"; return 1; }
 
-  bw list items 2>/dev/null | python3 - "$out" <<'PY'
+  local items_json
+  if ! items_json=$(bw list items 2>/dev/null) || [ -z "$items_json" ]; then
+    warn "bw list items returned empty/error; skipping identity discovery"
+    echo '{}' > "$out"
+    return 1
+  fi
+
+  printf '%s' "$items_json" | python3 - "$out" <<'PY'
 import sys, json, os
 out_path = sys.argv[1]
 prefix = "Machine Identity: "
-items = json.load(sys.stdin)
+try:
+    items = json.load(sys.stdin)
+except json.JSONDecodeError:
+    print("  WARN: bw list items returned non-JSON output; skipping identity discovery", file=sys.stderr)
+    with open(out_path, "w") as f:
+        json.dump({}, f)
+    sys.exit(0)
 registry = {}
 for item in items:
     name = item.get("name", "")
