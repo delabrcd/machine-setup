@@ -141,7 +141,10 @@ for item in items:
     with open(path, "w") as f:
         f.write(body + "\n")
     count += 1
-print(f"  Discovered {count} profile item(s) in Bitwarden", file=sys.stderr)
+if count:
+    print(f"  Discovered {count} profile item(s) in Bitwarden", file=sys.stderr)
+else:
+    print("  No \"Machine Profile: *\" items found in Bitwarden", file=sys.stderr)
 ' "$profiles_dir"
 }
 
@@ -209,6 +212,10 @@ for item in items:
     }
 with open(out_path, "w") as f:
     json.dump(registry, f, indent=2)
-print("  Discovered " + str(len(registry)) + " identity item(s) in Bitwarden", file=sys.stderr)
+names = sorted(registry.keys())
+if names:
+    print("  Discovered " + str(len(registry)) + " identity item(s) in Bitwarden: " + ", ".join(names), file=sys.stderr)
+else:
+    print("  No \"Machine Identity: *\" items found in Bitwarden", file=sys.stderr)
 ' "$out"
 }

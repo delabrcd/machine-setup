@@ -207,10 +207,15 @@ print(json.dumps([{'host': host, 'git_url_patterns': patterns, 'credential_helpe
   _bw_upsert_identity "Machine Identity: $name" "$git_name" "$git_email" \
                       "id_ed25519_$name" "$is_default" "$applies_to_json" "$priv" "$pub"
 
-  echo ""
-  echo "Public key (register on the relevant service):"
-  echo ""
-  echo "$pub"
+  echo "" > /dev/tty
+  echo "Public key (register on the relevant service):" > /dev/tty
+  echo "" > /dev/tty
+  echo "$pub" > /dev/tty
+  echo "" > /dev/tty
+  if [ -r /dev/tty ]; then
+    printf "Press ENTER once the key is registered (or Ctrl+C to abort): " > /dev/tty
+    read -r _ < /dev/tty || true
+  fi
 }
 
 case "$mode" in

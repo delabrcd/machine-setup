@@ -16,6 +16,11 @@
 #   7. Summarize failures
 
 set -euo pipefail
+
+# Ctrl+C exits the bootstrap immediately. No fall-through, no half-applied
+# state. Pickers + bw prompts that read /dev/tty all bubble SIGINT here.
+trap 'echo ""; echo "Aborted by user." >&2; exit 130' INT
+
 MACHINE_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MACHINE_SETUP_DIR
 

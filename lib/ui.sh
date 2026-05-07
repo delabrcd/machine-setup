@@ -144,7 +144,9 @@ ui_pick_components() {
     return 0
   fi
 
-  _ui_prompt_components || { warn "Picker cancelled — using profile defaults"; COMPONENTS_OVERRIDE=""; return 0; }
+  # Picker cancellation is terminal. No silent fall-back to profile defaults
+  # here — that mode is what --quiet is for.
+  _ui_prompt_components || die "Component selection cancelled."
   _machine_config_write components "$COMPONENTS_OVERRIDE"
   log "Saved component selection to $MACHINE_CONFIG_FILE"
 }
@@ -271,7 +273,7 @@ ui_pick_identities() {
     return 0
   fi
 
-  _ui_prompt_identities || { warn "Identity picker cancelled — using profile defaults"; IDENTITIES_OVERRIDE=""; return 0; }
+  _ui_prompt_identities || die "Identity selection cancelled."
   _machine_config_write identities "$IDENTITIES_OVERRIDE"
   log "Saved identity selection to $MACHINE_CONFIG_FILE"
 }
@@ -282,36 +284,76 @@ ui_pick_identities_force() {
   ui_pick_identities
 }
 
+# Sentinel "name" used for the synthetic [+] picker entry. Anything containing
+# spaces won't collide with real identity names (validation rejects spaces).
+_NEW_IDENT_TAG="__create_new_identity__"
+
 _ui_prompt_identities() {
-  local json names=() emails=() defaults=()
-  json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-identities --profile "$PROFILE") \
-    || { warn "Failed to list identities"; return 1; }
+  while :; do
+    local json names=() emails=() defaults=()
+    json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-identities --profile "$PROFILE") \
+      || die "Failed to list identities"
 
-  if [ -z "$json" ]; then
-    warn "No identities discovered. Add a BW item named 'Machine Identity: <name>' or a local/identities/<name>.toml file."
-    IDENTITIES_OVERRIDE=""
-    return 0
-  fi
+    # Synthetic top entry: lets the user create a new identity inline. The
+    # picker re-shows after creation so the new identity becomes selectable.
+    names+=("$_NEW_IDENT_TAG")
+    emails+=("[+] Create a new identity in Bitwarden...")
+    defaults+=("0")
 
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    names+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")")
-    emails+=("$(printf '%s' "$line" | python3 -c "
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      names+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")")
+      emails+=("$(printf '%s' "$line" | python3 -c "
 import sys,json; d=json.loads(sys.stdin.read())
 src=d.get('source',''); n=d.get('git_name',''); e=d.get('git_email','')
 print(f'{n} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")")
-    defaults+=("$(printf '%s' "$line" | python3 -c "import sys,json; print('1' if json.loads(sys.stdin.read()).get('in_profile') else '0')")")
-  done <<< "$json"
+      defaults+=("$(printf '%s' "$line" | python3 -c "import sys,json; print('1' if json.loads(sys.stdin.read()).get('in_profile') else '0')")")
+    done <<< "$json"
 
-  if [ "${#names[@]}" -eq 0 ]; then
-    warn "No identities found"
-    return 1
-  fi
+    if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
+      _ui_whiptail_identities names emails defaults
+    else
+      _ui_toggle_fallback_identities names emails defaults
+    fi
 
-  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
-    _ui_whiptail_identities names emails defaults
-  else
-    _ui_toggle_fallback_identities names emails defaults
+    # If the synthetic entry was selected, run the wizard then re-loop.
+    case ",$IDENTITIES_OVERRIDE," in
+      *",$_NEW_IDENT_TAG,"*)
+        IDENTITIES_OVERRIDE=$(printf '%s' "$IDENTITIES_OVERRIDE" \
+          | tr ',' '\n' | grep -vxF "$_NEW_IDENT_TAG" | paste -sd ',' -)
+        _ui_create_identity_wizard || die "Identity creation cancelled."
+        continue
+        ;;
+    esac
+    break
+  done
+}
+
+# Inline identity-creation wizard. Calls tools/seed-bw-identity.sh new <name>
+# (which prompts for git_name/email/host/helper, generates ed25519, stores in
+# BW, prints the public key for registration), then refreshes the runtime
+# registry so the picker re-shows with the new identity present.
+_ui_create_identity_wizard() {
+  [ -r /dev/tty ] || { warn "no /dev/tty for wizard"; return 1; }
+
+  local ident_name=""
+  while :; do
+    printf '\nNew identity name (alphanumeric/-/_, e.g. personal): ' > /dev/tty
+    if ! read -r ident_name < /dev/tty; then
+      return 1
+    fi
+    if [[ "$ident_name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      break
+    fi
+    echo "  invalid — use only letters, digits, hyphens, underscores" > /dev/tty
+  done
+
+  bash "$MACHINE_SETUP_DIR/tools/seed-bw-identity.sh" new "$ident_name" \
+    || { warn "Identity creation failed"; return 1; }
+
+  # Refresh the registry so the next picker iteration sees the new item.
+  if [ -n "${MACHINE_SETUP_IDENTITY_REGISTRY:-}" ]; then
+    bw_discover_identities "$MACHINE_SETUP_IDENTITY_REGISTRY" || true
   fi
 }
 
