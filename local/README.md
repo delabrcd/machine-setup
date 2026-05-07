@@ -1,57 +1,52 @@
 # `local/` — per-host private overlay
 
-Everything in this directory (except this README and `.gitkeep`) is **gitignored**.
-At bootstrap time the loader looks for files here first, then falls back to the
-repo defaults — so you can override any profile, identity, or component without
-leaking anything into the public history.
+Everything here (except this README and `.gitkeep`) is **gitignored**. At
+bootstrap time the loader checks `local/` first, then falls back to the
+in-repo defaults — so you can override any profile, identity, or component
+without leaking anything into public history.
 
 ## Directory layout
 
 ```
 local/
-├── profiles/<name>.toml      # extra or overriding profiles
-├── identities/<name>.toml    # extra or overriding identities
-└── components/<name>/        # per-component overrides (manifest, scripts)
+├── profiles/<name>.toml      # private profile bindings (chezmoi.repo, dev-utilities.repo, etc.)
+├── identities/<name>.toml    # OPTIONAL — TOML fallback for identities not in Bitwarden
+└── components/<name>/        # per-component overrides (manifest + scripts)
     ├── manifest.toml
     └── linux.sh
 ```
 
+## Recommended: identities live in Bitwarden, not here
+
+The bootstrap discovers identities at runtime from BW items named
+`Machine Identity: <name>`. See the top-level README for the field
+schema. The TOML fallback below is only useful if you genuinely don't
+want to use Bitwarden for an identity (rare).
+
 ## Typical usage: adding a work overlay
 
-Two files. First, the work identity:
+### 1. Create a work identity in Bitwarden
 
-```toml
-# local/identities/work.toml
-name = "work"
-git_name = "Your Name"
-git_email = "you@employer.com"
-bw_ssh_item = "Machine SSH Key Work"
-ssh_key_basename = "id_ed25519_work"
-default = false   # personal stays default; work is scoped via includeIf
+Easiest way: use the helper.
 
-# Bitbucket only supports SSH for git auth.
-[[applies_to]]
-host = "bitbucket.org"
-git_url_patterns = [
-    "git@bitbucket.org:*/*",
-    "https://bitbucket.org/*/*",
-]
-credential_helper = "ssh"
-register_url = "https://bitbucket.org/account/settings/ssh-keys/"
-register_label = "Bitbucket (SSH key)"
+```sh
+export BW_SESSION="$(bw unlock --raw)"
+~/.local/share/machine-setup/tools/seed-bw-identity.sh new work
+```
 
-# If your work GitHub access is gated by SSO/HTTPS, prefer GCM here. Otherwise
-# drop this block entirely — the personal identity already covers github.com.
-[[applies_to]]
-host = "github.com"
-git_url_patterns = [
-    "git@github-work:*/*",                         # if you set up an SSH host alias
-    "https://github.com/your-employer-org/*",      # tighter than `*/*`
-]
-credential_helper = "gcm"
+It prompts for `git_name`, `git_email`, host (e.g. `bitbucket.org`), and
+credential helper (e.g. `ssh`); generates a fresh ed25519 key; stores
+everything in a BW item called `Machine Identity: work`. Then register
+the printed public key on the relevant service.
 
+If you already have a TOML identity + an existing BW SSH-key item:
 
-Then a work profile that bundles personal + work:
+```sh
+~/.local/share/machine-setup/tools/seed-bw-identity.sh from-toml local/identities/work.toml \
+    --ssh-from "Machine SSH Key Work"
+```
+
+### 2. Drop a work profile in `local/profiles/`
 
 ```toml
 # local/profiles/work-desktop.toml
@@ -66,11 +61,12 @@ components = [
     "dev-utilities", "bitbucket-mcp",
 ]
 
-identities = ["personal", "work"]
+# Empty list means "show the picker over BW-discovered identities".
+# Pre-pin specific names here if you want to skip the picker.
+identities = []
 
 [component_config.chezmoi]
-repo = "https://github.com/yourname/claude-config.git"
-reset_entry_key = "register-mcp-servers.sh"
+repo = "https://github.com/yourname/dotfiles.git"
 
 [component_config.dev-utilities]
 repo = "git@bitbucket.org:workspace-name/dev-utilities.git"
@@ -80,14 +76,17 @@ dest = "~/.local/share/dev-utilities"
 path = "~/.local/share/dev-utilities/bitbucket-mcp"
 ```
 
-That's it — `bash bootstrap.sh` will pick up the new profile in the picker.
+That's it — `bash bootstrap.sh` will offer the new profile in the
+profile picker, then offer your `personal` and `work` BW identities in
+the identity picker.
 
-## Tip: keeping `local/` synced across machines
+## Keeping `local/` synced across machines
 
-Since `local/` is gitignored, you have to bring it onto each new machine
-yourself. A few options:
+Since this directory is gitignored, you have to bring it onto each new
+machine yourself. Identities don't need this — they sync via Bitwarden
+automatically. The remaining file (`local/profiles/work-desktop.toml`
+or similar) is small and easy to move:
 
-- **Bitwarden secure note** — paste the contents of each file into a single
-  note, then recreate them on each machine.
-- **Private gist or repo** — clone into `local/` after the first bootstrap.
-- **rsync from another box** — fastest for one-off setups.
+- **Bitwarden secure note** — paste the TOML into one BW note, recreate the file on each machine
+- **Private gist / repo** — clone into `local/` after the first bootstrap
+- **rsync / scp** — fastest one-off (`tools/install-remote.sh` does this automatically when bootstrapping over SSH)

@@ -48,7 +48,7 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: F401  (kept for clarity)
 
 try:
     import tomllib  # py3.11+
@@ -133,13 +133,78 @@ def load_profile(name: str) -> dict:
     return data
 
 
+def _registry_lookup(name: str) -> dict | None:
+    """If MACHINE_SETUP_IDENTITY_REGISTRY points at a JSON file, look up
+    `name` in it. The registry is populated at runtime by the bootstraps
+    after Bitwarden unlock (one entry per "Machine Identity: <name>" item).
+    """
+    path = os.environ.get("MACHINE_SETUP_IDENTITY_REGISTRY")
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            registry = json.load(f)
+    except Exception:
+        return None
+    return registry.get(name)
+
+
 def load_identity(name: str) -> dict:
+    # 1. Runtime registry (BW-discovered identities) wins. The bootstrap
+    #    populates this before any per-identity component runs.
+    data = _registry_lookup(name)
+    if data is not None:
+        data = dict(data)  # copy — don't mutate registry
+        data.setdefault("name", name)
+        data.setdefault("ssh_key_basename", f"id_ed25519_{data['name']}")
+        data.setdefault("applies_to", [])
+        return data
+    # 2. local/identities/<name>.toml or identities/<name>.toml fallback
     path = _resolve("identities", name)
     data = _load_toml(path)
     data.setdefault("name", name)
     data.setdefault("ssh_key_basename", f"id_ed25519_{data['name']}")
     data.setdefault("applies_to", [])
     return data
+
+
+def list_known_identities() -> list[dict]:
+    """Every identity discoverable on this machine: registry entries (BW)
+    + TOML files. Registry wins on name collision. Used by the picker.
+    """
+    out: dict[str, dict] = {}
+    # TOML files first
+    for base in (REPO, LOCAL):
+        d = base / "identities"
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*.toml")):
+            data = _load_toml(p)
+            name = data.get("name") or p.stem
+            out[name] = {
+                "name": name,
+                "git_name": data.get("git_name", ""),
+                "git_email": data.get("git_email", ""),
+                "default": bool(data.get("default")),
+                "source": "local-toml" if base == LOCAL else "repo-toml",
+            }
+    # BW registry overrides
+    path = os.environ.get("MACHINE_SETUP_IDENTITY_REGISTRY")
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                registry = json.load(f)
+            for name, data in registry.items():
+                out[name] = {
+                    "name": name,
+                    "git_name": data.get("git_name", ""),
+                    "git_email": data.get("git_email", ""),
+                    "default": bool(data.get("default")),
+                    "source": "bitwarden",
+                }
+        except Exception:
+            pass
+    return list(out.values())
 
 
 def load_component_manifest(name: str) -> dict:
@@ -262,7 +327,12 @@ def cmd_resolve(args):
         # `--components ""` means "empty list", `--components a,b,c` is the list.
         override = [c.strip() for c in args.components.split(",") if c.strip()]
     components = resolve_components(profile, os_tag, override=override)
-    identities = [load_identity(n) for n in profile["identities"]]
+
+    if args.identities is not None:
+        identity_names = [n.strip() for n in args.identities.split(",") if n.strip()]
+    else:
+        identity_names = profile["identities"]
+    identities = [load_identity(n) for n in identity_names]
 
     # Decorate each component with the per-OS script path (if any)
     kind = "linux" if os_tag.startswith("linux") else os_tag
@@ -283,6 +353,21 @@ def cmd_resolve(args):
         "components": plan,
         "identities": identities,
     }, indent=2))
+
+
+def cmd_list_identities(args):
+    """List every identity discoverable on this machine (BW registry + TOML).
+    With --profile, mark in_profile=true for identities the profile names.
+    """
+    in_profile: set[str] = set()
+    if args.profile:
+        try:
+            in_profile = set(load_profile(args.profile)["identities"])
+        except FileNotFoundError as e:
+            sys.exit(f"ERROR: {e}")
+    for ident in list_known_identities():
+        ident["in_profile"] = ident["name"] in in_profile
+        print(json.dumps(ident))
 
 
 def cmd_list_components(args):
@@ -335,12 +420,17 @@ def main():
     p_resolve.add_argument("profile")
     p_resolve.add_argument("--os-tag")
     p_resolve.add_argument("--components", help="comma-separated override of profile.components")
+    p_resolve.add_argument("--identities", help="comma-separated override of profile.identities")
     p_resolve.set_defaults(func=cmd_resolve)
 
     p_listc = sub.add_parser("list-components", help="emit one JSON-per-line for each available component")
     p_listc.add_argument("--profile", help="if given, mark in_profile=true for components in this profile")
     p_listc.add_argument("--os-tag")
     p_listc.set_defaults(func=cmd_list_components)
+
+    p_listi = sub.add_parser("list-identities", help="emit one JSON-per-line for each known identity (registry + TOML)")
+    p_listi.add_argument("--profile", help="if given, mark in_profile=true for identities in this profile")
+    p_listi.set_defaults(func=cmd_list_identities)
 
     p_ident = sub.add_parser("identity-env", help="emit KEY=value lines for an identity")
     p_ident.add_argument("identity")

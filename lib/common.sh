@@ -92,3 +92,59 @@ d = json.load(sys.stdin)
 print(next((f['value'] for f in d.get('fields', []) if f.get('name') == '$field'), ''))
 "
 }
+
+# Discover identities stored in Bitwarden. An identity is a BW item whose name
+# begins with "Machine Identity: " — the suffix is the identity name. The item
+# carries custom fields:
+#   git_name, git_email, ssh_key_basename, default ("true"/"false"),
+#   applies_to_json (JSON of the host/url-pattern/credential_helper config)
+# plus the existing private_key (hidden) + public_key (text) fields.
+#
+# Writes a JSON map { name → identity-dict } to the path given as $1, suitable
+# for MACHINE_SETUP_IDENTITY_REGISTRY. Returns 0 on success even if no
+# identities were found (writes "{}").
+bw_discover_identities() {
+  local out="$1"
+  command -v bw >/dev/null 2>&1 || { warn "bw not installed; skipping BW identity discovery"; echo '{}' > "$out"; return 1; }
+  check_bw_session 2>/dev/null || { warn "BW session not active; skipping discovery"; echo '{}' > "$out"; return 1; }
+
+  bw list items 2>/dev/null | python3 - "$out" <<'PY'
+import sys, json, os
+out_path = sys.argv[1]
+prefix = "Machine Identity: "
+items = json.load(sys.stdin)
+registry = {}
+for item in items:
+    name = item.get("name", "")
+    if not name.startswith(prefix):
+        continue
+    ident_name = name[len(prefix):].strip()
+    if not ident_name:
+        continue
+    fields = {f.get("name"): f.get("value") for f in (item.get("fields") or [])}
+    applies_to = []
+    raw = fields.get("applies_to_json", "")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                applies_to = parsed
+        except Exception:
+            pass
+    registry[ident_name] = {
+        "name": ident_name,
+        "git_name": fields.get("git_name", ""),
+        "git_email": fields.get("git_email", ""),
+        "ssh_key_basename": fields.get("ssh_key_basename") or f"id_ed25519_{ident_name}",
+        # When the identity item itself holds the SSH key, point bw_ssh_item at
+        # this same item — ssh-key.linux.sh will read private/public keys from
+        # the same BW lookup.
+        "bw_ssh_item": name,
+        "default": (fields.get("default") or "").strip().lower() == "true",
+        "applies_to": applies_to,
+    }
+with open(out_path, "w") as f:
+    json.dump(registry, f, indent=2)
+print(f"  Discovered {len(registry)} identity item(s) in Bitwarden", file=sys.stderr)
+PY
+}

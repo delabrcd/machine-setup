@@ -23,9 +23,11 @@ _record_failure() {
 driver_load_plan() {
   local profile="$1"
   local components="${2:-}"   # optional: comma-separated override
+  local identities="${3:-}"   # optional: comma-separated override
   local args=(resolve "$profile")
   [ -n "${MACHINE_SETUP_OS_TAG:-}" ] && args+=(--os-tag "$MACHINE_SETUP_OS_TAG")
   [ -n "$components" ] && args+=(--components "$components")
+  [ -n "$identities" ] && args+=(--identities "$identities")
   PLAN_JSON=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" "${args[@]}") \
     || die "Failed to resolve profile '$profile'"
   export PLAN_JSON

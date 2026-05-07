@@ -1,0 +1,30 @@
+name = "windows-host"
+description = "Windows host template — Windows-side packages/SSH/git/identity, then delegates Linux setup to WSL"
+
+components = [
+    # Windows host
+    "packages",
+    "bw-cli",
+    "git-base",
+    "git-identity",
+    "ssh-key",
+    "credential-helpers",
+    "bw-unlock-shell",
+    "claude-code",
+    "chezmoi",
+    "wsl-bootstrap",
+
+    # WSL pass — filtered out on Windows host, runs inside WSL with the same
+    # profile name; pulls in the components below at that point.
+    "nvm",
+    "uv",
+    "wsl-interop",
+]
+
+identities = []
+
+# wsl-bootstrap distro defaults to "Ubuntu". Configure chezmoi via a local/
+# overlay if you want dotfiles applied:
+#
+#   [component_config.chezmoi]
+#   repo = "https://github.com/<you>/dotfiles.git"

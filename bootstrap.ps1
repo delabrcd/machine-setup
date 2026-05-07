@@ -64,25 +64,45 @@ Write-Step "Component selection"
 $componentsOverride = Select-Components -ProfileName $profileName -OsTag $osTag `
     -Force:$Reconfigure -Quiet:$Quiet
 
-# Resolve plan ---------------------------------------------------------------
-Write-Step "Resolve plan"
+# Pre-load plan with profile defaults so we can decide whether to unlock BW
+Write-Step "Resolve plan (initial)"
 $script:Plan = Resolve-Plan -ProfileName $profileName -OsTag $osTag -Components $componentsOverride
 Write-Log ("Components: " + (($script:Plan.components | ForEach-Object { $_.name }) -join " "))
-Write-Log ("Identities: " + (($script:Plan.identities | ForEach-Object { $_.name }) -join " "))
 
-# Bitwarden session ----------------------------------------------------------
+# Bitwarden session + identity discovery -------------------------------------
 Write-Step "Bitwarden session"
-if (Test-BwSessionRequired -Plan $script:Plan) {
+$needBw = (Test-BwSessionRequired -Plan $script:Plan) -or (-not $Quiet)
+if ($needBw) {
     if (-not (Unlock-BwSession)) {
-        Write-Warn "BW unlock failed -- components requiring it will be skipped"
+        Write-Warn "BW unlock failed -- identity discovery + BW components will be skipped"
     }
 } else {
-    Write-Log "No component in this profile needs Bitwarden -- skipping unlock."
+    Write-Log "No BW-using component in this profile -- skipping unlock."
 }
+
+Write-Step "Identity discovery"
+$script:IdentityRegistryFile = Join-Path $env:TEMP ("machine-setup-identities-{0}.json" -f $PID)
+Find-BwIdentities -RegistryPath $script:IdentityRegistryFile | Out-Null
+$env:MACHINE_SETUP_IDENTITY_REGISTRY = $script:IdentityRegistryFile
+
+Write-Step "Identity selection"
+$identitiesOverride = Select-Identities -ProfileName $profileName -Force:$Reconfigure -Quiet:$Quiet
+
+# Re-resolve plan with chosen identities -------------------------------------
+Write-Step "Resolve plan (final)"
+$script:Plan = Resolve-Plan -ProfileName $profileName -OsTag $osTag `
+    -Components $componentsOverride -Identities $identitiesOverride
+Write-Log ("Components: " + (($script:Plan.components | ForEach-Object { $_.name }) -join " "))
+Write-Log ("Identities: " + (($script:Plan.identities | ForEach-Object { $_.name }) -join " "))
 
 # Run components -------------------------------------------------------------
 Invoke-Plan -Plan $script:Plan
 Write-Summary
+
+# Cleanup identity registry temp file ----------------------------------------
+if ($script:IdentityRegistryFile -and (Test-Path $script:IdentityRegistryFile)) {
+    Remove-Item -Force $script:IdentityRegistryFile -ErrorAction SilentlyContinue
+}
 
 # Cleanup --------------------------------------------------------------------
 Remove-Item env:BW_PASSWORD -ErrorAction SilentlyContinue

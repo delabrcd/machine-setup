@@ -12,19 +12,38 @@ OS tags it supports (`linux-ubuntu`, `linux-fedora`, `linux-arch`, `wsl`,
 ## Anatomy
 
 ```
-profiles/<name>.toml             # what gets installed (components + identities)
-identities/<name>.toml           # name/email/SSH key per git identity
+profiles/<name>.toml             # generic templates (components, no identities)
 components/<name>/
     manifest.toml                # name, supported OSes, deps, per_identity flag
     linux.sh                     # Linux/WSL implementation (optional)
     windows.ps1                  # Windows implementation (optional)
-local/                           # gitignored overlay — mirrors the layout above
-    profiles/, identities/, components/
+local/                           # gitignored overlay — your private bindings
+    profiles/<name>.toml         # repo URLs, chezmoi.repo, pinned identities
+    identities/<name>.toml       # OPTIONAL — TOML fallback if you don't use BW
 ```
 
-`local/` always wins. Drop work-only profiles, employer email, private repo
-URLs, or any other private config there and the public repo stays clean.
-See [`local/README.md`](local/README.md) for a worked example.
+**Identities live in Bitwarden.** Each identity is a BW item named
+`Machine Identity: <name>` with these fields:
+
+| Field              | Type   | What it is                                              |
+| ------------------ | ------ | ------------------------------------------------------- |
+| `git_name`         | text   | git `user.name`                                         |
+| `git_email`        | text   | git `user.email`                                        |
+| `ssh_key_basename` | text   | optional, defaults to `id_ed25519_<name>`               |
+| `default`          | text   | `"true"` for the global default identity (one per host) |
+| `applies_to_json`  | text   | JSON: `[{"host":"...","git_url_patterns":[...],"credential_helper":"ssh|gcm|bitwarden|none"}]` |
+| `public_key`       | text   | OpenSSH `ssh-ed25519 AAAA...`                           |
+| `private_key`      | hidden | OpenSSH private key                                     |
+
+The bootstrap discovers these at runtime, shows a picker pre-checked
+according to the active profile, and saves your selection to
+`~/.config/machine-setup/machine.toml`. The public repo carries no
+identity data.
+
+`local/` always wins for profiles. Drop work-only profile bindings
+(chezmoi repo URL, dev-utilities repo URL, etc.) there and the public
+repo stays generic. See [`local/README.md`](local/README.md) for a
+worked example.
 
 ## One-liners (fresh machine)
 
@@ -69,26 +88,32 @@ $env:MACHINE_SETUP_PROFILE = "windows-desktop"
 1. **Profile picker** — pick one of `profiles/*.toml` (or `local/profiles/*.toml`).
 2. **Component picker** — every component supported by the current OS is shown,
    pre-checked according to the chosen profile. Toggle individual ones on/off.
-   The resolver still pulls in transitive deps automatically — selecting just
-   `claude-code` will quietly pull in `packages`. `--quiet` skips this step
-   and uses the profile's component list as-is.
-3. **Bitwarden unlock** — only happens if any component in the resolved plan
-   actually needs it.
-4. **Run** — components execute in dependency order, per-identity components
-   loop over the profile's identities.
+   The resolver pulls transitive deps in automatically — selecting just
+   `claude-code` will quietly pull in `packages`.
+3. **Bitwarden unlock** — fired if either (a) the plan has a BW-using
+   component, or (b) we want to discover identities from BW (default).
+4. **Identity picker** — every BW item named `Machine Identity: *` (plus any
+   `local/identities/<name>.toml`) shows up. Pre-checked according to the
+   profile. Toggle which identities should be installed on this machine.
+5. **Run** — components execute in dependency order; per-identity components
+   loop over the chosen identities.
 
-Both choices persist to `~/.config/machine-setup/machine.toml` (or
-`%USERPROFILE%\.config\...` on Windows) — subsequent runs are non-interactive.
-Edit the file, delete it, or pass `--reconfigure` to re-pick.
+`--quiet` (Linux: `-q`) skips the component + identity pickers and uses the
+profile's lists as-is. All three choices (profile / components / identities)
+persist to `~/.config/machine-setup/machine.toml` (or
+`%USERPROFILE%\.config\...` on Windows). Re-pick with `--reconfigure`.
 
 ## Built-in profiles
 
-| Profile           | OS targets        | Identities  | Notes                                            |
-| ----------------- | ----------------- | ----------- | ------------------------------------------------ |
-| `minimal`         | Linux/WSL         | none        | Just packages + Claude Code                      |
-| `personal-server` | Linux/WSL         | personal    | Adds BW SSH key, git config, GCM for github.com  |
-| `personal-desktop`| Linux/WSL         | personal    | Adds uv + chezmoi-managed Claude Code config     |
-| `windows-desktop` | Windows + WSL     | personal    | Windows-side identity, then runs personal-* in WSL |
+All in-repo profiles ship with `identities = []` — pick which BW
+identities to install at runtime via the picker.
+
+| Profile          | OS targets        | What it sets up                                  |
+| ---------------- | ----------------- | ------------------------------------------------ |
+| `minimal`        | Linux/WSL         | Just packages + Claude Code (no identity work)   |
+| `linux-server`   | Linux/WSL         | + BW SSH key, git config, credential helpers     |
+| `linux-desktop`  | Linux/WSL         | + uv + chezmoi (configure repo via local/)       |
+| `windows-host`   | Windows + WSL     | Windows-side ident, then delegates to WSL bootstrap |
 
 Define your own in `profiles/<name>.toml` (or `local/profiles/<name>.toml`).
 
@@ -137,29 +162,76 @@ anywhere in its execution path. You can't accidentally install a work
 key on a personal machine because there's nowhere for that intent to
 hide.
 
-## Bitwarden items
+## Adding a new identity
 
-Components that touch Bitwarden look up items by name. Each identity's
-SSH item must have:
+### Option 1: directly in the Bitwarden web UI
 
-| Field         | Type           |
-| ------------- | -------------- |
-| `private_key` | hidden / secure |
-| `public_key`  | text            |
+1. Create a Secure Note named `Machine Identity: <yourname>`.
+2. Add custom fields (text, except `private_key` which is hidden):
+   `git_name`, `git_email`, `default` (`"true"` or `"false"`),
+   `applies_to_json` (see below), `public_key`, `private_key`.
+3. Save. Bootstrap will pick it up on next run via the identity picker.
 
-The `ssh-key` component will *generate and store* a fresh ed25519 key
-the first time it can't find the named item. Private keys are never
-written to disk on Linux/WSL (loaded straight from BW into `ssh-add`).
-On Windows they're written to a temp file with restricted ACL, loaded
-into `ssh-agent`, and immediately deleted.
+`applies_to_json` example for a personal GitHub identity that uses SSH:
 
-For the `bitwarden` credential helper (currently Linux-only), declare:
+```json
+[
+  {
+    "host": "github.com",
+    "git_url_patterns": ["git@github.com:*/*", "https://github.com/*/*"],
+    "credential_helper": "ssh"
+  }
+]
+```
+
+### Option 2: from the CLI
+
+```sh
+export BW_SESSION="$(bw unlock --raw)"
+
+# Interactive — prompts for name/email/host/helper, generates SSH key,
+# stores in BW with all fields:
+./tools/seed-bw-identity.sh new personal
+
+# Or migrate an existing identities/<name>.toml + an existing SSH key item:
+./tools/seed-bw-identity.sh from-toml local/identities/work.toml \
+    --ssh-from "Machine SSH Key Work"
+```
+
+Both forms upsert idempotently — re-running updates fields in place.
+
+### Option 3: TOML fallback (no Bitwarden)
+
+Create `local/identities/<name>.toml` with the same shape as the
+identity registry. The bootstrap loads it if no BW item matches. This
+works for the SSH key fields too — point `bw_ssh_item` at any existing
+BW SSH-key item to keep using one.
+
+## Private keys never on disk
+
+On Linux/WSL the `ssh-key` component pipes the private key directly
+from BW into `ssh-add -` — it never touches disk. On Windows the private
+key is written to a temp file with restricted ACL, loaded into the
+ssh-agent service (which persists keys across reboots in DPAPI-encrypted
+storage), and the temp file is immediately deleted.
+
+The `ssh-key` component also auto-generates a fresh ed25519 key the
+first time it can't find a BW item for an identity, then stores it back
+in BW — same flow as before.
+
+## Bitwarden credential helper (HTTPS auth)
+
+For hosts that auth via username/api-token (corporate Bitbucket etc.),
+declare on the identity's `applies_to` entry:
 
 ```toml
-bw_credential_item  = "Some BW Item"
-bw_username_field   = "username"
-bw_password_field   = "api_token"
+credential_helper  = "bitwarden"
+bw_credential_item = "Some BW Item"
+bw_username_field  = "username"
+bw_password_field  = "api_token"
 ```
+
+Currently Linux/WSL only.
 
 ## Auth scheme conventions
 

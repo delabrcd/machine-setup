@@ -242,6 +242,138 @@ _ui_toggle_fallback() {
   COMPONENTS_OVERRIDE=$(IFS=,; printf '%s' "${out[*]}")
 }
 
+# ── Identity picker ─────────────────────────────────────────────────────────
+
+# Sets IDENTITIES_OVERRIDE — comma-separated list of selected identity names.
+# Order: $MACHINE_SETUP_IDENTITIES → saved machine.toml → TUI prompt over the
+# discovered set (BW + TOML).
+#
+# Caller must have populated MACHINE_SETUP_IDENTITY_REGISTRY (path to BW
+# discovery JSON) before calling this — otherwise only TOML identities show up.
+ui_pick_identities() {
+  if [ -n "${MACHINE_SETUP_IDENTITIES:-}" ]; then
+    IDENTITIES_OVERRIDE="$MACHINE_SETUP_IDENTITIES"
+    log "Using identities from MACHINE_SETUP_IDENTITIES"
+    return 0
+  fi
+
+  local saved
+  saved=$(_machine_config_read identities)
+  if [ -n "$saved" ]; then
+    IDENTITIES_OVERRIDE="$saved"
+    log "Using saved identity selection ($MACHINE_CONFIG_FILE)"
+    return 0
+  fi
+
+  if [ "${QUIET_MODE:-0}" = "1" ]; then
+    log "Quiet mode: using profile's identity list as-is."
+    IDENTITIES_OVERRIDE=""
+    return 0
+  fi
+
+  _ui_prompt_identities || { warn "Identity picker cancelled — using profile defaults"; IDENTITIES_OVERRIDE=""; return 0; }
+  _machine_config_write identities "$IDENTITIES_OVERRIDE"
+  log "Saved identity selection to $MACHINE_CONFIG_FILE"
+}
+
+ui_pick_identities_force() {
+  unset MACHINE_SETUP_IDENTITIES
+  _machine_config_unset identities
+  ui_pick_identities
+}
+
+_ui_prompt_identities() {
+  local json names=() emails=() defaults=()
+  json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-identities --profile "$PROFILE") \
+    || { warn "Failed to list identities"; return 1; }
+
+  if [ -z "$json" ]; then
+    warn "No identities discovered. Add a BW item named 'Machine Identity: <name>' or a local/identities/<name>.toml file."
+    IDENTITIES_OVERRIDE=""
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    names+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")")
+    emails+=("$(printf '%s' "$line" | python3 -c "
+import sys,json; d=json.loads(sys.stdin.read())
+src=d.get('source',''); n=d.get('git_name',''); e=d.get('git_email','')
+print(f'{n} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")")
+    defaults+=("$(printf '%s' "$line" | python3 -c "import sys,json; print('1' if json.loads(sys.stdin.read()).get('in_profile') else '0')")")
+  done <<< "$json"
+
+  if [ "${#names[@]}" -eq 0 ]; then
+    warn "No identities found"
+    return 1
+  fi
+
+  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
+    _ui_whiptail_identities names emails defaults
+  else
+    _ui_toggle_fallback_identities names emails defaults
+  fi
+}
+
+_ui_whiptail_identities() {
+  local -n _names=$1 _descs=$2 _defaults=$3
+  local args=()
+  for i in "${!_names[@]}"; do
+    local on="OFF"
+    [ "${_defaults[$i]}" = "1" ] && on="ON"
+    local d="${_descs[$i]}"
+    [ "${#d}" -gt 50 ] && d="${d:0:47}..."
+    args+=("${_names[$i]}" "$d" "$on")
+  done
+  local picked
+  picked=$(whiptail \
+    --title "machine-setup -- identities for profile '$PROFILE'" \
+    --checklist "Select which identities to install on this machine. Default = identities listed in the profile." \
+    20 80 12 \
+    "${args[@]}" \
+    3>&1 1>&2 2>&3 < /dev/tty) || return 1
+  IDENTITIES_OVERRIDE=$(printf '%s' "$picked" | sed 's/"//g' | tr ' ' ',')
+}
+
+_ui_toggle_fallback_identities() {
+  local -n _names=$1 _descs=$2 _defaults=$3
+  local -a sel=("${_defaults[@]}")
+  [ -r /dev/tty ] || die "No /dev/tty available — set MACHINE_SETUP_IDENTITIES=<csv> or use --quiet"
+
+  while :; do
+    echo "" > /dev/tty
+    echo "Identities for profile '$PROFILE' — toggle by number, ENTER to confirm:" > /dev/tty
+    echo "" > /dev/tty
+    local i
+    for i in "${!_names[@]}"; do
+      local mark="[ ]"
+      [ "${sel[$i]}" = "1" ] && mark="[x]"
+      printf "  %2d) %s %-15s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
+    done
+    echo "" > /dev/tty
+    printf "> " > /dev/tty
+    local input
+    if ! read -r input < /dev/tty; then
+      die "tty closed — cannot read identity selection"
+    fi
+    [ -z "$input" ] && break
+    for tok in $input; do
+      if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#_names[@]}" ]; then
+        local idx=$((tok - 1))
+        if [ "${sel[$idx]}" = "1" ]; then sel[$idx]=0; else sel[$idx]=1; fi
+      else
+        echo "  ignored: $tok" > /dev/tty
+      fi
+    done
+  done
+
+  local out=()
+  for i in "${!_names[@]}"; do
+    [ "${sel[$i]}" = "1" ] && out+=("${_names[$i]}")
+  done
+  IDENTITIES_OVERRIDE=$(IFS=,; printf '%s' "${out[*]}")
+}
+
 # ── machine.toml read/write ─────────────────────────────────────────────────
 
 _machine_config_read() {

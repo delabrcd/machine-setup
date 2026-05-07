@@ -42,13 +42,150 @@ function Get-Profiles {
 }
 
 function Resolve-Plan {
-    param([string]$ProfileName, [string]$OsTag, [string]$Components)
+    param([string]$ProfileName, [string]$OsTag, [string]$Components, [string]$Identities)
     $args = @("$script:MachineSetupDir\lib\config.py", "resolve", $ProfileName)
     if ($OsTag)      { $args += @("--os-tag", $OsTag) }
     if ($Components) { $args += @("--components", $Components) }
+    if ($Identities) { $args += @("--identities", $Identities) }
     $json = & (Get-Python) @args
     if ($LASTEXITCODE -ne 0) { Write-Die "Failed to resolve profile '$ProfileName'" }
     return ($json -join "`n") | ConvertFrom-Json
+}
+
+# Scan BW for "Machine Identity: *" items and write a registry JSON file.
+# Returns the path. Writes "{}" if BW unavailable.
+function Find-BwIdentities {
+    param([string]$RegistryPath)
+    if (-not (Get-Command bw -ErrorAction SilentlyContinue)) {
+        Write-Warn "bw not installed; skipping BW identity discovery"
+        '{}' | Set-Content -Path $RegistryPath -Encoding utf8
+        return $RegistryPath
+    }
+    if (-not $env:BW_SESSION) {
+        Write-Warn "BW_SESSION not set; skipping BW identity discovery"
+        '{}' | Set-Content -Path $RegistryPath -Encoding utf8
+        return $RegistryPath
+    }
+
+    $itemsJson = & { $ErrorActionPreference = "Continue"; bw list items 2>$null }
+    if (-not $itemsJson) {
+        '{}' | Set-Content -Path $RegistryPath -Encoding utf8
+        return $RegistryPath
+    }
+
+    $items = @($itemsJson | ConvertFrom-Json)
+    $registry = [ordered]@{}
+    $prefix = "Machine Identity: "
+
+    foreach ($item in $items) {
+        if (-not $item.name) { continue }
+        if (-not $item.name.StartsWith($prefix)) { continue }
+        $identName = $item.name.Substring($prefix.Length).Trim()
+        if (-not $identName) { continue }
+        $fields = @{}
+        if ($item.fields) {
+            foreach ($f in $item.fields) { $fields[$f.name] = $f.value }
+        }
+        $appliesTo = @()
+        if ($fields["applies_to_json"]) {
+            try {
+                $parsed = $fields["applies_to_json"] | ConvertFrom-Json
+                if ($parsed -is [array]) { $appliesTo = $parsed }
+            } catch {}
+        }
+        $registry[$identName] = @{
+            name             = $identName
+            git_name         = ($fields["git_name"] -as [string])
+            git_email        = ($fields["git_email"] -as [string])
+            ssh_key_basename = if ($fields["ssh_key_basename"]) { $fields["ssh_key_basename"] } else { "id_ed25519_$identName" }
+            bw_ssh_item      = $item.name
+            default          = (($fields["default"] -as [string]) -eq "true")
+            applies_to       = $appliesTo
+        }
+    }
+
+    ($registry | ConvertTo-Json -Depth 6) | Set-Content -Path $RegistryPath -Encoding utf8
+    Write-Host "  Discovered $($registry.Keys.Count) identity item(s) in Bitwarden" -ForegroundColor DarkGray
+    return $RegistryPath
+}
+
+function Get-AvailableIdentities {
+    param([string]$ProfileName)
+    $args = @("$script:MachineSetupDir\lib\config.py", "list-identities")
+    if ($ProfileName) { $args += @("--profile", $ProfileName) }
+    $lines = & (Get-Python) @args
+    $out = @()
+    foreach ($line in $lines) {
+        if ($line -match '\S') { $out += ($line | ConvertFrom-Json) }
+    }
+    return $out
+}
+
+# Returns comma-separated string of selected identity names, or $null to keep
+# the profile's defaults.
+function Select-Identities {
+    param(
+        [Parameter(Mandatory)] [string]$ProfileName,
+        [switch]$Force,
+        [switch]$Quiet
+    )
+    if ($env:MACHINE_SETUP_IDENTITIES) {
+        Write-Log "Using identities from MACHINE_SETUP_IDENTITIES"
+        return $env:MACHINE_SETUP_IDENTITIES
+    }
+    if (-not $Force) {
+        $saved = Get-MachineConfig identities
+        if ($saved -is [array] -and $saved.Count -gt 0) {
+            Write-Log "Using saved identity selection ($Global:MachineConfigFile)"
+            return ($saved -join ",")
+        }
+    } else {
+        Remove-MachineConfigKey identities
+    }
+    if ($Quiet) {
+        Write-Log "Quiet mode: using profile's identity list as-is."
+        return $null
+    }
+
+    $idents = Get-AvailableIdentities -ProfileName $ProfileName
+    if (-not $idents -or $idents.Count -eq 0) {
+        Write-Warn "No identities discovered. Add a BW item named 'Machine Identity: <name>' or a local/identities/<name>.toml file."
+        return $null
+    }
+
+    $selected = New-Object 'System.Collections.Generic.List[bool]'
+    foreach ($i in $idents) { $selected.Add([bool]$i.in_profile) }
+
+    while ($true) {
+        Write-Host ""
+        Write-Host "Identities for profile '$ProfileName' -- toggle by number, ENTER to confirm:" -ForegroundColor Cyan
+        Write-Host ""
+        for ($i = 0; $i -lt $idents.Count; $i++) {
+            $mark = if ($selected[$i]) { "[x]" } else { "[ ]" }
+            $email = if ($idents[$i].git_email) { $idents[$i].git_email } else { "(no email)" }
+            $line = "  {0,2}) {1} {2,-15} {3,-25} <{4}> [{5}]" -f ($i + 1), $mark, $idents[$i].name, $idents[$i].git_name, $email, $idents[$i].source
+            if ($selected[$i]) { Write-Host $line -ForegroundColor Green } else { Write-Host $line -ForegroundColor DarkGray }
+        }
+        Write-Host ""
+        $input = Read-Host "Enter numbers to toggle, or ENTER to confirm"
+        if (-not $input -or $input.Trim() -eq "") { break }
+        foreach ($tok in ($input -split '\s+')) {
+            if ($tok -match '^\d+$') {
+                $n = [int]$tok
+                if ($n -ge 1 -and $n -le $idents.Count) {
+                    $selected[$n - 1] = -not $selected[$n - 1]
+                } else { Write-Host "  ignored: $tok (out of range)" -ForegroundColor Yellow }
+            } elseif ($tok) { Write-Host "  ignored: $tok" -ForegroundColor Yellow }
+        }
+    }
+
+    $picked = @()
+    for ($i = 0; $i -lt $idents.Count; $i++) {
+        if ($selected[$i]) { $picked += $idents[$i].name }
+    }
+    Set-MachineConfig identities $picked
+    Write-Log "Saved identity selection to $Global:MachineConfigFile"
+    return ($picked -join ",")
 }
 
 function Get-IdentityEnv {

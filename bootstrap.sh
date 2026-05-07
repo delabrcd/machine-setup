@@ -89,17 +89,52 @@ else
   ui_pick_components
 fi
 
-step "Resolve plan"
+# Pre-load plan with whatever identities the profile names — used to decide
+# whether we need to unlock Bitwarden before discovering identities.
+step "Resolve plan (initial)"
 driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}"
 log "Components: $(driver_components | paste -sd ' ' -)"
-log "Identities: $(driver_identities | paste -sd ' ' -)"
 
+# Bitwarden unlock + identity discovery ───────────────────────────────────────
+# Reasons we might need BW now:
+#   - profile/local/identities/<x>.toml says bw_ssh_item / bitwarden helper
+#   - identity picker wants to discover "Machine Identity: *" items
+# If the profile pre-pins identities AND none of them need BW, skip unlock.
 step "Bitwarden session"
-if bw_session_required; then
-  bw_session_unlock || warn "BW unlock failed — components requiring it will be skipped"
-else
-  log "No component in this profile needs Bitwarden — skipping unlock."
+NEED_BW_FOR_DISCOVERY=1   # always try to discover unless quiet+no-identities
+if [ "${QUIET_MODE:-0}" = "1" ] && ! bw_session_required; then
+  NEED_BW_FOR_DISCOVERY=0
 fi
+if bw_session_required || [ "$NEED_BW_FOR_DISCOVERY" = "1" ]; then
+  bw_session_unlock || warn "BW unlock failed — identity discovery + BW components will be skipped"
+else
+  log "No BW-using component in this profile — skipping unlock."
+fi
+
+# Discover identities from BW into a registry file. config.py reads
+# MACHINE_SETUP_IDENTITY_REGISTRY for any name not present in TOML files.
+step "Identity discovery"
+IDENTITY_REGISTRY_FILE="${TMPDIR:-/tmp}/machine-setup-identities-$$.json"
+trap 'rm -f "$IDENTITY_REGISTRY_FILE"' EXIT
+if check_bw_session 2>/dev/null; then
+  bw_discover_identities "$IDENTITY_REGISTRY_FILE" || true
+else
+  echo '{}' > "$IDENTITY_REGISTRY_FILE"
+fi
+export MACHINE_SETUP_IDENTITY_REGISTRY="$IDENTITY_REGISTRY_FILE"
+
+step "Identity selection"
+if [ "$RECONFIGURE" = "1" ]; then
+  ui_pick_identities_force
+else
+  ui_pick_identities
+fi
+
+# Re-resolve plan with the chosen identities folded in ───────────────────────
+step "Resolve plan (final)"
+driver_load_plan "$PROFILE" "${COMPONENTS_OVERRIDE:-}" "${IDENTITIES_OVERRIDE:-}"
+log "Components: $(driver_components | paste -sd ' ' -)"
+log "Identities: $(driver_identities | paste -sd ' ' -)"
 
 # Run all components in topo order ───────────────────────────────────────────
 driver_run_all
