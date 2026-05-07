@@ -114,7 +114,10 @@ bw_discover_profiles() {
     return 1
   fi
 
-  printf '%s' "$items_json" | python3 - "$profiles_dir" <<'PY'
+  # Note: pass the python program via -c so stdin stays free for the JSON
+  # data on the pipe. Using `python3 -` plus a heredoc would put the script
+  # on stdin and json.load would read EOF.
+  printf '%s' "$items_json" | python3 -c '
 import sys, json, os, re
 profiles_dir = sys.argv[1]
 prefix = "Machine Profile: "
@@ -129,17 +132,17 @@ for item in items:
     if not name.startswith(prefix):
         continue
     profile_name = name[len(prefix):].strip()
-    if not profile_name or not re.fullmatch(r'[A-Za-z0-9_-]+', profile_name):
+    if not profile_name or not re.fullmatch(r"[A-Za-z0-9_-]+", profile_name):
         continue
     body = (item.get("notes") or "").strip()
     if not body:
         continue
-    path = os.path.join(profiles_dir, f"{profile_name}.toml")
+    path = os.path.join(profiles_dir, profile_name + ".toml")
     with open(path, "w") as f:
         f.write(body + "\n")
     count += 1
 print(f"  Discovered {count} profile item(s) in Bitwarden", file=sys.stderr)
-PY
+' "$profiles_dir"
 }
 
 # Discover identities stored in Bitwarden. An identity is a BW item whose name
@@ -164,7 +167,9 @@ bw_discover_identities() {
     return 1
   fi
 
-  printf '%s' "$items_json" | python3 - "$out" <<'PY'
+  # Note: program via -c, JSON via stdin pipe. See bw_discover_profiles for the
+  # heredoc-vs-pipe-collision rationale.
+  printf '%s' "$items_json" | python3 -c '
 import sys, json, os
 out_path = sys.argv[1]
 prefix = "Machine Identity: "
@@ -197,16 +202,13 @@ for item in items:
         "name": ident_name,
         "git_name": fields.get("git_name", ""),
         "git_email": fields.get("git_email", ""),
-        "ssh_key_basename": fields.get("ssh_key_basename") or f"id_ed25519_{ident_name}",
-        # When the identity item itself holds the SSH key, point bw_ssh_item at
-        # this same item — ssh-key.linux.sh will read private/public keys from
-        # the same BW lookup.
+        "ssh_key_basename": fields.get("ssh_key_basename") or ("id_ed25519_" + ident_name),
         "bw_ssh_item": name,
         "default": (fields.get("default") or "").strip().lower() == "true",
         "applies_to": applies_to,
     }
 with open(out_path, "w") as f:
     json.dump(registry, f, indent=2)
-print(f"  Discovered {len(registry)} identity item(s) in Bitwarden", file=sys.stderr)
-PY
+print("  Discovered " + str(len(registry)) + " identity item(s) in Bitwarden", file=sys.stderr)
+' "$out"
 }
