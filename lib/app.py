@@ -358,16 +358,10 @@ class ComponentScreen(Screen):
 # ── Config screen ───────────────────────────────────────────────────────────
 
 CONFIG_SCHEMA: dict[str, list[tuple[str, str, str | None]]] = {
-    "chezmoi": [
-        ("repo", "Dotfiles repo URL (e.g. https://github.com/<you>/dotfiles.git)", None),
-    ],
-    "dev-utilities": [
-        ("repo", "git URL of repo to clone", None),
-        ("dest", "Destination path", "~/.local/share/dev-utilities"),
-    ],
-    "bitbucket-mcp": [
-        ("path", "MCP source dir", "~/.local/share/dev-utilities/bitbucket-mcp"),
-    ],
+    # chezmoi-source ships inside this repo at $MACHINE_SETUP_DIR/chezmoi-source
+    # so no repo URL prompt is needed. Override via machine.toml's
+    # [component_config.chezmoi].source if you want a different source dir.
+    # dev-utilities + bitbucket-mcp are gone (replaced by aashari MCP via npx).
     "wsl-bootstrap": [
         ("distro", "WSL distro name", "Ubuntu"),
     ],
