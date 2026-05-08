@@ -104,8 +104,14 @@ for app in json.load(sys.stdin):
   echo ""
   cat "$_pub"
   echo ""
-  if [ -t 0 ]; then
+  # Pause for the user to register the new key on the relevant service —
+  # except under the TUI, where /dev/tty is owned by Textual and a read
+  # would deadlock. The component log shows the pubkey + URL; user can
+  # register it later (subsequent components retry on next bootstrap).
+  if [ "${MACHINE_SETUP_NONINTERACTIVE:-0}" != "1" ] && [ -t 0 ]; then
     read -r -p "Press ENTER once the key is added (or Ctrl-C to do later): " _ < /dev/tty || true
+  else
+    warn "Bootstrap is non-interactive — register the key above before re-running components that need it."
   fi
 }
 

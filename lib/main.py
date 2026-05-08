@@ -287,22 +287,25 @@ def prompt_component_config(state: dict, os_tag: str, quiet: bool) -> None:
 
 # ── Textual fullscreen pickers ──────────────────────────────────────────────
 
-def run_textual_pickers(state: dict, os_tag: str, registry_file: Path) -> bool:
-    """Drive the entire interactive phase via the Textual app — including
-    BW unlock + identity discovery. Returns True if the user completed the
-    flow, False if Textual is unavailable.
+def run_textual_pickers(state: dict, os_tag: str, registry_file: Path) -> tuple[bool, list[str] | None]:
+    """Drive the entire interactive phase + plan execution via the Textual
+    app. Returns (handled_in_textual, failed_components_or_None).
+
+    handled_in_textual = True when the Textual flow ran end-to-end (incl. plan).
+                         The caller skips its own plan run.
+    handled_in_textual = False when Textual unavailable; caller falls back to
+                         questionary pickers + plain-terminal plan run.
     """
     if not sys.stdin.isatty():
-        return False
+        return (False, None)
     if tui.ensure_textual() is None:
-        return False
+        return (False, None)
     try:
         import app as _app  # noqa: F401  (loads from LIB_DIR via sys.path)
     except Exception as e:
         log(f"Textual app failed to import ({type(e).__name__}: {e}); falling back")
-        return False
+        return (False, None)
 
-    # Loop to handle the [+] create-new-identity flow.
     while True:
         result = _app.run_app(
             initial_state=state,
@@ -315,10 +318,10 @@ def run_textual_pickers(state: dict, os_tag: str, registry_file: Path) -> bool:
         if action == "create_identity":
             state.update(result.get("state") or {})
             run_create_identity_wizard()
-            # Re-launch — discovery inside the app will pick up the new item
             continue
+        # done — plan has already run inside the app, summary already shown
         state.update(result.get("state") or {})
-        return True
+        return (True, result.get("failed") or [])
 
 
 def run_create_identity_wizard() -> None:
@@ -420,33 +423,35 @@ def main() -> int:
     _REGISTRY_FILE.write_text("{}")
     os.environ["MACHINE_SETUP_IDENTITY_REGISTRY"] = str(_REGISTRY_FILE)
 
-    pickers_ok = False
     if not args.quiet:
-        pickers_ok = run_textual_pickers(state, os_tag, _REGISTRY_FILE)
+        handled, failed = run_textual_pickers(state, os_tag, _REGISTRY_FILE)
+        if handled:
+            # The Textual app already ran the plan + showed the summary;
+            # main.py just exits with the right code.
+            return 0 if not failed else 1
 
-    if not pickers_ok:
-        # Fallback path: BW unlock + discovery + questionary pickers in steps.
-        step("OS detection")
-        log(f"OS tag: {os_tag}")
+    # Fallback path: BW unlock + discovery + questionary pickers in steps.
+    step("OS detection")
+    log(f"OS tag: {os_tag}")
 
-        step("Bitwarden session")
-        if bw.have_bw():
-            bw.unlock()
-        else:
-            warn("bw CLI not installed yet — install will add it; re-run after.")
+    step("Bitwarden session")
+    if bw.have_bw():
+        bw.unlock()
+    else:
+        warn("bw CLI not installed yet — install will add it; re-run after.")
 
-        step("BW discovery")
-        if bw.is_unlocked():
-            bw.write_identity_registry(_REGISTRY_FILE)
+    step("BW discovery")
+    if bw.is_unlocked():
+        bw.write_identity_registry(_REGISTRY_FILE)
 
-        step("Identity selection")
-        pick_identities(state, force=args.reconfigure, quiet=args.quiet)
-        step("Per-identity auth")
-        pick_auth(state, quiet=args.quiet)
-        step("Component selection")
-        pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
-        step("Component configuration")
-        prompt_component_config(state, os_tag, quiet=args.quiet)
+    step("Identity selection")
+    pick_identities(state, force=args.reconfigure, quiet=args.quiet)
+    step("Per-identity auth")
+    pick_auth(state, quiet=args.quiet)
+    step("Component selection")
+    pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
+    step("Component configuration")
+    prompt_component_config(state, os_tag, quiet=args.quiet)
 
     # Persist all state
     config_dir.mkdir(parents=True, exist_ok=True)

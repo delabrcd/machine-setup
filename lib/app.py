@@ -18,11 +18,11 @@ import json, os, re, sys
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll, Center
+from textual.containers import VerticalScroll, Vertical, Center
 from textual.screen import Screen
 from textual.widgets import (
-    Footer, Header, Input, RadioButton, RadioSet,
-    SelectionList, Static,
+    Footer, Header, Input, ProgressBar, RadioButton, RadioSet,
+    RichLog, SelectionList, Static,
 )
 from textual.widgets.selection_list import Selection
 
@@ -473,17 +473,169 @@ class SudoScreen(Screen):
         status: Static = self.query_one("#sudo-status", Static)
         if proc.returncode == 0:
             self.app.state["_sudo_cached"] = True
-            self.app.call_from_thread(
-                self.app.exit,
-                {"action": "done", "state": self.app.state},
-            )
+            self.app.call_from_thread(self.app.advance_to_run)
         else:
             self.app.call_from_thread(status.update, "Wrong password — try again, or Esc to skip.")
             self.app.call_from_thread(self.query_one("#sudo-pw", Input).focus)
 
     def action_skip(self) -> None:
         self.app.state["_sudo_cached"] = False
-        self.app.exit({"action": "done", "state": self.app.state})
+        self.app.advance_to_run()
+
+
+# ── Run-plan screen ─────────────────────────────────────────────────────────
+
+class RunPlanScreen(Screen):
+    """Execute the resolved plan inside the TUI, streaming each component's
+    output into a RichLog. Subprocess captures stdout+stderr line by line and
+    pushes them onto the UI thread via call_from_thread.
+    """
+    BINDINGS = [Binding("q", "quit", "Quit")]
+
+    def __init__(self, plan: dict, machine_setup_dir: Path):
+        super().__init__()
+        self.plan = plan
+        self.machine_setup_dir = machine_setup_dir
+        self.failed: list[str] = []
+        self._done = False
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Vertical():
+            yield Static("Running plan...", id="run-status", classes="step")
+            total = max(1, sum(
+                len(self.plan["identities"]) if c["per_identity"] else 1
+                for c in self.plan["components"]
+            ))
+            yield ProgressBar(total=total, show_eta=False, id="run-progress")
+            yield RichLog(id="run-log", markup=True, max_lines=4000, auto_scroll=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.run_worker(self._run_all(), thread=True, exclusive=True)
+
+    # ── Worker ─────────────────────────────────────────────────────────────
+
+    def _write(self, text: str) -> None:
+        rl: RichLog = self.query_one("#run-log", RichLog)
+        rl.write(text)
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#run-status", Static).update(text)
+
+    def _advance_progress(self) -> None:
+        self.query_one("#run-progress", ProgressBar).advance(1)
+
+    def _run_one(self, comp: dict, ident: dict | None) -> int:
+        """Run a single component (optionally per-identity) and stream output
+        into the log. Returns subprocess exit code."""
+        import subprocess, shlex
+        env = os.environ.copy()
+        env["MACHINE_SETUP_DIR"] = str(self.machine_setup_dir)
+        env["COMPONENT_CONFIG_JSON"] = json.dumps(comp.get("config") or {})
+        env["PLAN_JSON"] = json.dumps(self.plan)
+        # Tell scripts they're running under a TUI so they skip "press ENTER"
+        # interactive pauses.
+        env["MACHINE_SETUP_NONINTERACTIVE"] = "1"
+        if ident:
+            env.update({
+                "IDENT_NAME":             ident["name"],
+                "IDENT_GIT_NAME":         ident.get("git_name", ""),
+                "IDENT_GIT_EMAIL":        ident.get("git_email", ""),
+                "IDENT_BW_SSH_ITEM":      ident.get("bw_ssh_item", ""),
+                "IDENT_SSH_KEY_BASENAME": ident.get("ssh_key_basename", f"id_ed25519_{ident['name']}"),
+                "IDENT_DEFAULT":          "1" if ident.get("default") else "0",
+                "IDENT_APPLIES_TO_JSON":  json.dumps(ident.get("applies_to", [])),
+            })
+
+        script = comp["script"]
+        if script.endswith(".ps1"):
+            from shutil import which
+            ps = which("pwsh") or which("powershell")
+            if not ps:
+                self.app.call_from_thread(self._write, "[red]  no pwsh/powershell found[/]")
+                return 1
+            cmd = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+        else:
+            common = self.machine_setup_dir / "lib" / "common.sh"
+            cmd = ["bash", "-c",
+                   f". {shlex.quote(str(common))}; . {shlex.quote(script)}"]
+
+        proc = subprocess.Popen(
+            cmd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            # Strip ANSI color codes — RichLog handles them but the bash
+            # `log` helper uses raw escapes that occasionally render oddly.
+            self.app.call_from_thread(self._write, line)
+        return proc.wait()
+
+    async def _run_all(self) -> None:
+        for comp in self.plan["components"]:
+            name = comp["name"]
+            self.app.call_from_thread(self._set_status, f"Running: {name}")
+            self.app.call_from_thread(self._write, f"\n[bold cyan]── {name} ──[/]")
+
+            if not comp["script"]:
+                self.app.call_from_thread(self._write, f"  no script for this OS — skipping")
+                self.app.call_from_thread(self._advance_progress)
+                continue
+
+            if comp["per_identity"]:
+                if not self.plan["identities"]:
+                    self.app.call_from_thread(
+                        self._write,
+                        f"  per-identity component but no identities chosen — skipping",
+                    )
+                    self.app.call_from_thread(self._advance_progress)
+                    continue
+                for ident in self.plan["identities"]:
+                    self.app.call_from_thread(
+                        self._write, f"[dim]  ↳ identity: {ident['name']}[/]"
+                    )
+                    rc = self._run_one(comp, ident)
+                    if rc != 0:
+                        self.failed.append(f"{name} [{ident['name']}]")
+                        self.app.call_from_thread(
+                            self._write,
+                            f"[red]  ✗ failed for {ident['name']} (exit {rc})[/]",
+                        )
+                    self.app.call_from_thread(self._advance_progress)
+            else:
+                rc = self._run_one(comp, None)
+                if rc != 0:
+                    self.failed.append(name)
+                    self.app.call_from_thread(self._write, f"[red]  ✗ failed (exit {rc})[/]")
+                self.app.call_from_thread(self._advance_progress)
+
+        # Done
+        self._done = True
+        if not self.failed:
+            self.app.call_from_thread(self._set_status, "[bold green]✓ Bootstrap complete[/]")
+            self.app.call_from_thread(self._write, "\n[bold green]All components succeeded.[/]")
+        else:
+            self.app.call_from_thread(
+                self._set_status,
+                f"[bold yellow]Finished with {len(self.failed)} failure(s)[/]",
+            )
+            self.app.call_from_thread(self._write, "\n[bold yellow]Failed:[/]")
+            for f in self.failed:
+                self.app.call_from_thread(self._write, f"  - {f}")
+        self.app.call_from_thread(self._write, "\n[dim]Press q to quit.[/]")
+
+    def action_quit(self) -> None:
+        if not self._done:
+            # Allow forceful quit mid-run too
+            pass
+        self.app.exit({
+            "action": "done",
+            "state":  self.app.state,
+            "failed": self.failed,
+        })
 
 
 # ── App ─────────────────────────────────────────────────────────────────────
@@ -590,20 +742,55 @@ class BootstrapApp(App):
             skip = True
         else:
             import subprocess as sp
-            # `sudo -n -v` exits 0 if cached or NOPASSWD; non-zero otherwise.
             try:
                 rc = sp.call(["sudo", "-n", "-v"], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
                 if rc == 0:
                     skip = True
                     self.state["_sudo_cached"] = True
             except FileNotFoundError:
-                # No sudo binary at all — also skip
                 skip = True
         if skip:
-            self.exit({"action": "done", "state": self.state})
+            self.advance_to_run()
             return
         self.pop_screen()
         self.push_screen(SudoScreen())
+
+    def advance_to_run(self) -> None:
+        """Persist machine.toml + start the in-TUI plan run."""
+        # Persist state before running so the user keeps their selections
+        # even if a component fails / they kill the run.
+        try:
+            from machine_config import _emit_toml as _toml_emit  # noqa: F401
+        except ImportError:
+            pass
+        # Save via subprocess (machine_config.py CLI) — same path main.py uses
+        import subprocess
+        config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "machine-setup"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "machine.toml"
+        payload = json.dumps({
+            "identities":         self.state.get("identities") or [],
+            "extra_components":   self.state.get("extra_components") or [],
+            "identity_overrides": self.state.get("identity_overrides") or {},
+            "component_config":   self.state.get("component_config") or {},
+        })
+        subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "machine_config.py"), "dump", str(config_file)],
+            input=payload, text=True,
+        )
+
+        # Build the actual plan
+        plan = driver.build_plan(
+            identities=self.state.get("identities") or [],
+            extra_components=self.state.get("extra_components") or [],
+            identity_overrides=self.state.get("identity_overrides") or {},
+            component_config=self.state.get("component_config") or {},
+            os_tag=self.os_tag,
+        )
+        machine_setup_dir = Path(__file__).resolve().parent.parent
+        # Pop whatever's currently on top (ConfigScreen or SudoScreen)
+        self.pop_screen()
+        self.push_screen(RunPlanScreen(plan, machine_setup_dir))
 
 
 # ── Entrypoint ──────────────────────────────────────────────────────────────
