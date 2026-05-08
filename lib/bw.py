@@ -22,7 +22,20 @@ def _warn(msg: str) -> None:
 
 
 def have_bw() -> bool:
-    return shutil.which("bw") is not None
+    """True if `bw` is on PATH OR present at a well-known per-user location.
+    Adds the location to PATH on the fly when found there — handles the case
+    where curl|bash gave us a non-interactive shell without ~/.local/bin."""
+    if shutil.which("bw"):
+        return True
+    for candidate in (Path.home() / ".local/bin/bw",
+                      Path.home() / ".local/bin/bw.exe",
+                      Path("/usr/local/bin/bw")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            d = str(candidate.parent)
+            if d not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return True
+    return False
 
 
 def ensure_installed() -> bool:
@@ -36,13 +49,16 @@ def ensure_installed() -> bool:
     Windows: tries winget. If unavailable, returns False so the caller can
     fall back to TOML-only identities.
     """
-    if have_bw():
-        return True
-
     user_bin = Path.home() / ".local" / "bin"
     user_bin.mkdir(parents=True, exist_ok=True)
+    # Ensure user_bin is on PATH BEFORE the have_bw check so a previously-
+    # installed binary at ~/.local/bin/bw is detected on every subsequent run
+    # (and we don't redownload it).
     if str(user_bin) not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = str(user_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    if have_bw():
+        return True
 
     if sys.platform == "win32":
         return _install_bw_windows()

@@ -40,5 +40,8 @@ $env:WSLENV = ($env:WSLENV + ":BW_SESSION/u:BW_PASSWORD/u").TrimStart(":")
 $drive = $env:MACHINE_SETUP_DIR[0].ToString().ToLower()
 $wslDir = "/mnt/$drive" + ($env:MACHINE_SETUP_DIR.Substring(2) -replace '\\','/')
 
-Write-Log "Running bootstrap.sh inside WSL $distro with saved selections..."
-wsl.exe -d $distro -- bash "$wslDir/bootstrap.sh" --quiet
+# Run the inner bootstrap WITHOUT --quiet so the user gets the same Textual
+# UI inside WSL. Saved state from the copied machine.toml means the pickers
+# come pre-filled — confirm with Ctrl+S to accept, or toggle to change.
+Write-Log "Launching bootstrap inside WSL $distro ..."
+wsl.exe -d $distro -- bash "$wslDir/bootstrap.sh"

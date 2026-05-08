@@ -362,6 +362,19 @@ def run_create_identity_wizard() -> None:
 _REGISTRY_FILE: Path = Path()
 
 
+def _ensure_local_bin_on_path() -> None:
+    """Add ~/.local/bin to PATH if it exists. Many of the tools we install
+    (bw, uv, claude, git-credential-manager) land there, but a non-
+    interactive shell launched via curl|bash often doesn't have it on PATH.
+    Without this, our `which`-based detection re-downloads tools every run.
+    """
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        path = os.environ.get("PATH", "")
+        if str(local_bin) not in path.split(os.pathsep):
+            os.environ["PATH"] = str(local_bin) + os.pathsep + path
+
+
 def _ensure_tty_stdin() -> None:
     """When launched via `curl | bash`, our stdin is the (closed) curl pipe.
     Redirect from /dev/tty so questionary, Textual, and bw all have a real
@@ -381,6 +394,7 @@ def main() -> int:
     # Ctrl+C exits cleanly with code 130 (no traceback)
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
+    _ensure_local_bin_on_path()
     _ensure_tty_stdin()
 
     parser = argparse.ArgumentParser(prog="machine-setup")
