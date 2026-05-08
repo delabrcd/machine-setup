@@ -24,6 +24,9 @@ import machine_config as mc  # noqa: E402
 import identity_ops  # noqa: E402
 import tui           # noqa: E402
 
+# Optional Textual import — handled lazily in run_pickers()
+_app_module = None
+
 
 # ── Logging helpers ─────────────────────────────────────────────────────────
 
@@ -282,6 +285,117 @@ def prompt_component_config(state: dict, os_tag: str, quiet: bool) -> None:
     state["component_config"] = json.loads(new_cfg_json)
 
 
+# ── Textual fullscreen pickers ──────────────────────────────────────────────
+
+def run_textual_pickers(state: dict, os_tag: str) -> bool:
+    """Try to drive identity/auth/component/config selection via the Textual
+    app. Returns True on success, False if Textual unavailable or aborted.
+    Caller falls back to the questionary subprocess pickers on False.
+    """
+    if not sys.stdin.isatty():
+        return False
+    if tui.ensure_textual() is None:
+        log("Textual not available; falling back to questionary pickers")
+        return False
+    try:
+        import app as _app  # noqa: F401  (loads from LIB_DIR via sys.path)
+    except ImportError as e:
+        log(f"Textual app failed to import ({e}); falling back")
+        return False
+
+    # Loop to handle the [+] create-new-identity flow: when the app exits
+    # with action="create_identity", run the wizard out-of-band, refresh the
+    # registry, then re-launch the app.
+    while True:
+        available = config.list_known_identities()
+
+        # Build auth_pairs from current selection
+        existing_overrides = state.get("identity_overrides") or {}
+        auth_pairs: list[dict] = []
+        for name in (state.get("identities") or []):
+            try:
+                ident = config.load_identity(name)
+            except FileNotFoundError:
+                continue
+            for at in (ident.get("applies_to") or []):
+                host = at.get("host")
+                if not host:
+                    continue
+                current = (
+                    existing_overrides.get(name, {}).get(host, {}).get("credential_helper")
+                    or at.get("credential_helper") or "ssh"
+                )
+                auth_pairs.append({"identity": name, "host": host, "current_helper": current})
+
+        # All components for this OS
+        all_components = [c for c in config.list_all_components() if os_tag in c.get("supported", [])]
+        required = config._required_components(state.get("identities") or [], os_tag)
+
+        # Project plan-component list for the config screen — what would actually
+        # run if the user accepted the current selection.
+        plan = driver.build_plan(
+            identities=state.get("identities") or [],
+            extra_components=state.get("extra_components") or [],
+            identity_overrides=state.get("identity_overrides") or {},
+            component_config=state.get("component_config") or {},
+            os_tag=os_tag,
+        )
+        plan_component_names = [c["name"] for c in plan["components"]]
+
+        result = _app.run_app(
+            initial_state=state,
+            available_idents=available,
+            all_components=all_components,
+            required=required,
+            plan_components=plan_component_names,
+            auth_pairs=auth_pairs,
+        )
+
+        action = result.get("action")
+        if action == "abort":
+            die("Aborted by user.", 130)
+        if action == "create_identity":
+            # Save partial state so identities the user already picked persist
+            state.update(result.get("state") or {})
+            run_create_identity_wizard()
+            continue
+        # done
+        state.update(result.get("state") or {})
+        return True
+
+
+def run_create_identity_wizard() -> None:
+    """Drop into questionary wizard to gather inputs, then create the BW
+    item via identity_ops + refresh the registry. Used by both the Textual
+    [+] flow and the questionary fallback path.
+    """
+    out_path = Path(tempfile.mktemp(suffix=".tui-out"))
+    try:
+        rc = subprocess.call([
+            sys.executable, str(LIB_DIR / "tui.py"),
+            "wizard-create-identity", "--output", str(out_path),
+        ])
+        if rc != 0 or not out_path.exists():
+            warn("Identity wizard cancelled")
+            return
+        inputs = json.loads(out_path.read_text())
+    finally:
+        out_path.unlink(missing_ok=True)
+
+    ok = identity_ops.create_identity_interactive(
+        name=inputs["name"],
+        git_name=inputs["git_name"],
+        git_email=inputs["git_email"],
+        is_default=(inputs.get("default") == "true"),
+        host=inputs.get("host", ""),
+        credential_helper=inputs.get("credential_helper", "ssh"),
+    )
+    if not ok:
+        warn("Identity creation failed")
+        return
+    bw.write_identity_registry(_REGISTRY_FILE)
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 # Path to the registry file we'll populate post-BW-unlock. Set in main().
@@ -335,17 +449,20 @@ def main() -> int:
         _REGISTRY_FILE.write_text("{}")
     os.environ["MACHINE_SETUP_IDENTITY_REGISTRY"] = str(_REGISTRY_FILE)
 
-    step("Identity selection")
-    pick_identities(state, force=args.reconfigure, quiet=args.quiet)
+    if not args.quiet and run_textual_pickers(state, os_tag):
+        log("Pickers complete (Textual TUI)")
+    else:
+        step("Identity selection")
+        pick_identities(state, force=args.reconfigure, quiet=args.quiet)
 
-    step("Per-identity auth")
-    pick_auth(state, quiet=args.quiet)
+        step("Per-identity auth")
+        pick_auth(state, quiet=args.quiet)
 
-    step("Component selection")
-    pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
+        step("Component selection")
+        pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
 
-    step("Component configuration")
-    prompt_component_config(state, os_tag, quiet=args.quiet)
+        step("Component configuration")
+        prompt_component_config(state, os_tag, quiet=args.quiet)
 
     # Persist all state
     config_dir.mkdir(parents=True, exist_ok=True)

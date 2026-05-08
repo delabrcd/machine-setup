@@ -27,6 +27,7 @@ from pathlib import Path
 
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "machine-setup" / "tui-deps"
 QUESTIONARY_PIN = "questionary>=2.0,<3.0"
+TEXTUAL_PIN     = "textual>=0.86,<2.0"
 
 
 def _log(msg: str) -> None:
@@ -58,43 +59,50 @@ def _ensure_tty_stdin() -> None:
         pass
 
 
-def _ensure_questionary():
-    """Return the questionary module or None if it can't be loaded."""
-    try:
-        import questionary  # noqa: F401
-        return questionary
-    except ImportError:
-        pass
-
-    # Add cache dir to sys.path before retrying — handles previously-installed
-    if CACHE_DIR.exists():
+def _try_import(module: str):
+    """Import a module, allowing the cache dir on sys.path."""
+    if CACHE_DIR.exists() and str(CACHE_DIR) not in sys.path:
         sys.path.insert(0, str(CACHE_DIR))
-        try:
-            import questionary
-            return questionary
-        except ImportError:
-            pass
+    try:
+        return __import__(module)
+    except ImportError:
+        return None
 
-    # Try to install via pip --target. Cache survives across runs; user can
-    # `rm -rf ~/.cache/machine-setup` to wipe.
+
+def _pip_install_to_cache(spec: str, label: str) -> bool:
+    """Install a single pip spec into CACHE_DIR. Returns True on success."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _log(f"==> Installing TUI dependencies into {CACHE_DIR} (one-time, ~150KB)...")
+    _log(f"==> Installing {label} into {CACHE_DIR} (one-time)...")
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet",
-             "--target", str(CACHE_DIR), QUESTIONARY_PIN],
+             "--target", str(CACHE_DIR), spec],
             stderr=subprocess.STDOUT,
         )
+        return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        _log(f"  pip install failed ({e}); falling back to plain prompts.")
-        return None
+        _log(f"  pip install failed ({e}).")
+        return False
 
-    sys.path.insert(0, str(CACHE_DIR))
-    try:
-        import questionary
-        return questionary
-    except ImportError:
+
+def _ensure_questionary():
+    """Return the questionary module or None."""
+    mod = _try_import("questionary")
+    if mod:
+        return mod
+    if not _pip_install_to_cache(QUESTIONARY_PIN, "questionary (~150KB)"):
         return None
+    return _try_import("questionary")
+
+
+def ensure_textual():
+    """Return the textual module or None — public so main.py can call it."""
+    mod = _try_import("textual")
+    if mod:
+        return mod
+    if not _pip_install_to_cache(TEXTUAL_PIN, "Textual TUI framework (~5MB)"):
+        return None
+    return _try_import("textual")
 
 
 # ── Plain-text fallback ─────────────────────────────────────────────────────
