@@ -6,10 +6,6 @@ supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
 # wires up the context7, jira (uvx), and bitbucket MCP servers, so it needs
 # claude-code present and uv installed.
 depends_on = ["claude-code", "uv", "ssh-key", "credential-helpers", "git-identity"]
-# Soft ordering: when dev-utilities is ALSO in the plan, chezmoi runs after
-# it so its register-mcp script can reference any cloned tooling. Not
-# transitive — picking chezmoi alone doesn't pull dev-utilities in.
-runs_after = ["dev-utilities"]
 per_identity = false
 
 # The driver makes profile-level [component_config.chezmoi] available to the

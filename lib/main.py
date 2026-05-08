@@ -365,31 +365,22 @@ _REGISTRY_FILE: Path = Path()
 def _cleanup_deprecated() -> None:
     """One-time cleanup of artifacts from removed/replaced components.
 
-    Currently handled:
-      - In-house bitbucket-mcp (replaced by aashari/mcp-server-atlassian-bitbucket
-        invoked via npx). Removes the built artifacts at
-        ~/.local/share/dev-utilities/bitbucket-mcp/{dist,node_modules,package-lock.json}
-        so disk doesn't keep stale junk. The dev-utilities clone itself stays
-        — it may contain other tooling.
+    Removes:
+      - The whole ~/.local/share/dev-utilities/ clone — used to host the
+        in-house bitbucket-mcp source, which we replaced with aashari/...
+        npx-runnable. The dev-utilities component is gone too.
     """
     if sys.platform == "win32":
-        return  # Windows side never built it
-    bbmcp = Path.home() / ".local" / "share" / "dev-utilities" / "bitbucket-mcp"
-    targets = [bbmcp / "dist", bbmcp / "node_modules", bbmcp / "package-lock.json"]
-    if not any(t.exists() for t in targets):
+        return  # Linux/WSL only
+    dev_utils = Path.home() / ".local" / "share" / "dev-utilities"
+    if not dev_utils.exists():
         return
-    log("Cleaning up deprecated in-house bitbucket-mcp artifacts...")
-    for t in targets:
-        if not t.exists():
-            continue
-        try:
-            if t.is_dir():
-                shutil.rmtree(t, ignore_errors=True)
-            else:
-                t.unlink(missing_ok=True)
-            log(f"  removed {t}")
-        except Exception as e:
-            warn(f"  failed to remove {t}: {e}")
+    log("Cleaning up deprecated ~/.local/share/dev-utilities/ tree...")
+    try:
+        shutil.rmtree(dev_utils, ignore_errors=True)
+        log(f"  removed {dev_utils}")
+    except Exception as e:
+        warn(f"  failed to remove {dev_utils}: {e}")
 
 
 def _ensure_local_bin_on_path() -> None:
