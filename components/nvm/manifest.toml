@@ -1,5 +1,7 @@
 name = "nvm"
 description = "nvm + Node.js LTS"
-supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+# windows: pickable in Windows TUI, no-op there (Windows uses winget for Node
+# if needed). Actual install runs inside WSL via wsl-bootstrap.
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
 depends_on = ["packages"]
 per_identity = false

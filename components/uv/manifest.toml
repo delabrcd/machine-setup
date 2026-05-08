@@ -1,5 +1,7 @@
 name = "uv"
 description = "uv (Astral) — Python package runner; required by uvx-based MCPs"
-supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+# windows: pickable in Windows TUI, no-op there (corp AV blocks the binary).
+# Actual install runs inside WSL via wsl-bootstrap state propagation.
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
 depends_on = []
 per_identity = false

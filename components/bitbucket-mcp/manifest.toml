@@ -1,6 +1,9 @@
 name = "bitbucket-mcp"
 description = "npm install + npm run build inside a directory containing an MCP server (defaults to dev-utilities/bitbucket-mcp)."
-supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+# Listed for windows so it's pickable in the Windows TUI; the windows arm is a
+# no-op (no windows.ps1) — the actual install runs inside WSL via wsl-bootstrap
+# which propagates the host's machine.toml.
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
 depends_on = ["nvm", "dev-utilities"]
 per_identity = false
 

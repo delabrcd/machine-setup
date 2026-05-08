@@ -617,7 +617,15 @@ class RunPlanScreen(Screen):
             self.app.call_from_thread(self._write, f"\n[bold cyan]── {name} ──[/]")
 
             if not comp["script"]:
-                self.app.call_from_thread(self._write, f"  no script for this OS — skipping")
+                # No implementation for this OS. On Windows this is the common
+                # case for WSL-only components like bitbucket-mcp / uv — they
+                # actually run inside WSL, propagated via wsl-bootstrap.
+                self.app.call_from_thread(
+                    self._write,
+                    f"[dim]  delegated to WSL via wsl-bootstrap[/]"
+                    if sys.platform == "win32"
+                    else f"  no implementation for this OS — skipping",
+                )
                 self.app.call_from_thread(self._advance_progress)
                 continue
 
