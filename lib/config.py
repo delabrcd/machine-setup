@@ -286,6 +286,10 @@ def load_component_manifest(name: str) -> dict:
     # outputs of an optional sibling.
     data.setdefault("runs_after", [])
     data.setdefault("per_identity", False)
+    # If true, the TUI suspends and the component gets the bare terminal
+    # (for sudo prompts, nested bootstraps inside WSL, etc.). Output is NOT
+    # captured into the RichLog for these.
+    data.setdefault("requires_tty", False)
     return data
 
 

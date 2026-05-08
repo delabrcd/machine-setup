@@ -76,6 +76,7 @@ def build_plan(
             "name":         m["name"],
             "description":  m.get("description", ""),
             "per_identity": m["per_identity"],
+            "requires_tty": bool(m.get("requires_tty")),
             "script":       str(script) if script else None,
             "config":       component_config.get(m["name"], {}),
             "required":     m["name"] in required_set,

@@ -526,16 +526,11 @@ class RunPlanScreen(Screen):
     def _advance_progress(self) -> None:
         self.query_one("#run-progress", ProgressBar).advance(1)
 
-    def _run_one(self, comp: dict, ident: dict | None) -> int:
-        """Run a single component (optionally per-identity) and stream output
-        into the log. Returns subprocess exit code."""
-        import subprocess, shlex
+    def _build_env(self, comp: dict, ident: dict | None) -> dict:
         env = os.environ.copy()
         env["MACHINE_SETUP_DIR"] = str(self.machine_setup_dir)
         env["COMPONENT_CONFIG_JSON"] = json.dumps(comp.get("config") or {})
         env["PLAN_JSON"] = json.dumps(self.plan)
-        # Tell scripts they're running under a TUI so they skip "press ENTER"
-        # interactive pauses.
         env["MACHINE_SETUP_NONINTERACTIVE"] = "1"
         if ident:
             env.update({
@@ -547,19 +542,34 @@ class RunPlanScreen(Screen):
                 "IDENT_DEFAULT":          "1" if ident.get("default") else "0",
                 "IDENT_APPLIES_TO_JSON":  json.dumps(ident.get("applies_to", [])),
             })
+        return env
 
+    def _build_cmd(self, comp: dict) -> list[str] | None:
+        import shlex
+        from shutil import which
         script = comp["script"]
         if script.endswith(".ps1"):
-            from shutil import which
             ps = which("pwsh") or which("powershell")
             if not ps:
-                self.app.call_from_thread(self._write, "[red]  no pwsh/powershell found[/]")
-                return 1
-            cmd = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
-        else:
-            common = self.machine_setup_dir / "lib" / "common.sh"
-            cmd = ["bash", "-c",
-                   f". {shlex.quote(str(common))}; . {shlex.quote(script)}"]
+                return None
+            return [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+        common = self.machine_setup_dir / "lib" / "common.sh"
+        return ["bash", "-c",
+                f". {shlex.quote(str(common))}; . {shlex.quote(script)}"]
+
+    def _run_one(self, comp: dict, ident: dict | None) -> int:
+        """Run a single component, streaming output into the log."""
+        import subprocess
+        env = self._build_env(comp, ident)
+        cmd = self._build_cmd(comp)
+        if cmd is None:
+            self.app.call_from_thread(self._write, "[red]  no interpreter for this OS[/]")
+            return 1
+
+        # `requires_tty` components hand the terminal back — needed for nested
+        # bootstraps inside WSL where sudo + BW prompts must reach the user.
+        if comp.get("requires_tty"):
+            return self._run_with_suspend(cmd, env, comp["name"])
 
         proc = subprocess.Popen(
             cmd, env=env,
@@ -568,11 +578,37 @@ class RunPlanScreen(Screen):
         )
         assert proc.stdout is not None
         for line in proc.stdout:
-            line = line.rstrip("\n")
-            # Strip ANSI color codes — RichLog handles them but the bash
-            # `log` helper uses raw escapes that occasionally render oddly.
-            self.app.call_from_thread(self._write, line)
+            self.app.call_from_thread(self._write, line.rstrip("\n"))
         return proc.wait()
+
+    def _run_with_suspend(self, cmd: list[str], env: dict, name: str) -> int:
+        """Suspend Textual for the duration of a subprocess so the user has a
+        normal terminal (sudo prompts, nested bootstrap, etc.). Returns exit
+        code. Worker thread blocks until the main-thread suspended block
+        returns."""
+        import subprocess, threading
+        result = {"rc": 0}
+        done = threading.Event()
+
+        def _on_main():
+            try:
+                with self.app.suspend():
+                    print()
+                    print(f">>> {name}: handing terminal over (Textual suspended)")
+                    print()
+                    result["rc"] = subprocess.call(cmd, env=env)
+                    print()
+                    print(f"<<< {name}: exit {result['rc']}")
+                    try:
+                        input("Press ENTER to return to the TUI...")
+                    except (EOFError, KeyboardInterrupt):
+                        pass
+            finally:
+                done.set()
+
+        self.app.call_from_thread(_on_main)
+        done.wait()
+        return result["rc"]
 
     async def _run_all(self) -> None:
         for comp in self.plan["components"]:

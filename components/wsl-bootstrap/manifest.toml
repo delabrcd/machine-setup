@@ -1,8 +1,13 @@
 name = "wsl-bootstrap"
-description = "From a Windows host, run bootstrap.sh inside WSL with the same profile name. Forwards BW_SESSION + BW_PASSWORD via WSLENV."
+description = "Run the full bootstrap inside WSL Ubuntu, inheriting the host's identity + component selections."
 supported = ["windows"]
 depends_on = ["packages"]
+runs_after = ["bw-cli", "ssh-key", "credential-helpers", "chezmoi"]
 per_identity = false
+# Hand the terminal over while running — the inner WSL bootstrap may need to
+# prompt for sudo (Linux side), and capturing its output through a pipe
+# would break those prompts.
+requires_tty = true
 
 # Profile config:
 #   [component_config.wsl-bootstrap]
