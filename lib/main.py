@@ -293,14 +293,15 @@ def run_textual_pickers(state: dict, os_tag: str) -> bool:
     Caller falls back to the questionary subprocess pickers on False.
     """
     if not sys.stdin.isatty():
+        log("No TTY on stdin (curl|bash without /dev/tty?); falling back to questionary pickers")
         return False
     if tui.ensure_textual() is None:
         log("Textual not available; falling back to questionary pickers")
         return False
     try:
         import app as _app  # noqa: F401  (loads from LIB_DIR via sys.path)
-    except ImportError as e:
-        log(f"Textual app failed to import ({e}); falling back")
+    except Exception as e:
+        log(f"Textual app failed to import ({type(e).__name__}: {e}); falling back")
         return False
 
     # Loop to handle the [+] create-new-identity flow: when the app exits
@@ -402,9 +403,26 @@ def run_create_identity_wizard() -> None:
 _REGISTRY_FILE: Path = Path()
 
 
+def _ensure_tty_stdin() -> None:
+    """When launched via `curl | bash`, our stdin is the (closed) curl pipe.
+    Redirect from /dev/tty so questionary, Textual, and bw all have a real
+    terminal to read from. No-op if stdin is already a tty or /dev/tty isn't
+    available (CI, non-interactive shells)."""
+    if sys.stdin.isatty():
+        return
+    try:
+        tty = open("/dev/tty", "r")
+        sys.stdin = tty
+        os.dup2(tty.fileno(), 0)  # make low-level fd 0 a tty too
+    except OSError:
+        pass
+
+
 def main() -> int:
     # Ctrl+C exits cleanly with code 130 (no traceback)
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+
+    _ensure_tty_stdin()
 
     parser = argparse.ArgumentParser(prog="machine-setup")
     parser.add_argument("--reconfigure", "-r", action="store_true",
