@@ -287,16 +287,14 @@ def prompt_component_config(state: dict, os_tag: str, quiet: bool) -> None:
 
 # ── Textual fullscreen pickers ──────────────────────────────────────────────
 
-def run_textual_pickers(state: dict, os_tag: str) -> bool:
-    """Try to drive identity/auth/component/config selection via the Textual
-    app. Returns True on success, False if Textual unavailable or aborted.
-    Caller falls back to the questionary subprocess pickers on False.
+def run_textual_pickers(state: dict, os_tag: str, registry_file: Path) -> bool:
+    """Drive the entire interactive phase via the Textual app — including
+    BW unlock + identity discovery. Returns True if the user completed the
+    flow, False if Textual is unavailable.
     """
     if not sys.stdin.isatty():
-        log("No TTY on stdin (curl|bash without /dev/tty?); falling back to questionary pickers")
         return False
     if tui.ensure_textual() is None:
-        log("Textual not available; falling back to questionary pickers")
         return False
     try:
         import app as _app  # noqa: F401  (loads from LIB_DIR via sys.path)
@@ -304,63 +302,21 @@ def run_textual_pickers(state: dict, os_tag: str) -> bool:
         log(f"Textual app failed to import ({type(e).__name__}: {e}); falling back")
         return False
 
-    # Loop to handle the [+] create-new-identity flow: when the app exits
-    # with action="create_identity", run the wizard out-of-band, refresh the
-    # registry, then re-launch the app.
+    # Loop to handle the [+] create-new-identity flow.
     while True:
-        available = config.list_known_identities()
-
-        # Build auth_pairs from current selection
-        existing_overrides = state.get("identity_overrides") or {}
-        auth_pairs: list[dict] = []
-        for name in (state.get("identities") or []):
-            try:
-                ident = config.load_identity(name)
-            except FileNotFoundError:
-                continue
-            for at in (ident.get("applies_to") or []):
-                host = at.get("host")
-                if not host:
-                    continue
-                current = (
-                    existing_overrides.get(name, {}).get(host, {}).get("credential_helper")
-                    or at.get("credential_helper") or "ssh"
-                )
-                auth_pairs.append({"identity": name, "host": host, "current_helper": current})
-
-        # All components for this OS
-        all_components = [c for c in config.list_all_components() if os_tag in c.get("supported", [])]
-        required = config._required_components(state.get("identities") or [], os_tag)
-
-        # Project plan-component list for the config screen — what would actually
-        # run if the user accepted the current selection.
-        plan = driver.build_plan(
-            identities=state.get("identities") or [],
-            extra_components=state.get("extra_components") or [],
-            identity_overrides=state.get("identity_overrides") or {},
-            component_config=state.get("component_config") or {},
-            os_tag=os_tag,
-        )
-        plan_component_names = [c["name"] for c in plan["components"]]
-
         result = _app.run_app(
             initial_state=state,
-            available_idents=available,
-            all_components=all_components,
-            required=required,
-            plan_components=plan_component_names,
-            auth_pairs=auth_pairs,
+            registry_file=registry_file,
+            os_tag=os_tag,
         )
-
-        action = result.get("action")
+        action = (result or {}).get("action")
         if action == "abort":
             die("Aborted by user.", 130)
         if action == "create_identity":
-            # Save partial state so identities the user already picked persist
             state.update(result.get("state") or {})
             run_create_identity_wizard()
+            # Re-launch — discovery inside the app will pick up the new item
             continue
-        # done
         state.update(result.get("state") or {})
         return True
 
@@ -433,15 +389,13 @@ def main() -> int:
 
     maybe_self_update()
 
-    step("OS detection")
+    # Detect OS + load saved state quietly — no banners, the TUI takes over
+    # immediately after this.
     os_tag = config.detect_os_tag()
-    log(f"OS tag: {os_tag}")
 
-    step("Load saved state")
     config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "machine-setup"
     config_file = config_dir / "machine.toml"
     if args.reconfigure and config_file.exists():
-        log("--reconfigure: clearing saved selections")
         config_file.unlink()
 
     raw = subprocess.run(
@@ -451,34 +405,39 @@ def main() -> int:
     state = json.loads(raw.stdout) if raw.stdout.strip() else {}
     state = migrate_legacy(state)
 
-    step("Bitwarden session")
-    if bw.have_bw():
-        bw.unlock()
-    else:
-        warn("bw CLI not installed yet — fresh install will install it; re-run after for BW-stored identities")
-
-    step("BW discovery")
+    # Reserve a registry path; BW unlock + discovery run inside the Textual app
+    # so the user sees the TUI as the very first interactive surface.
     global _REGISTRY_FILE
     bw_cache = Path(tempfile.mkdtemp(prefix="machine-setup-bw-"))
     _REGISTRY_FILE = bw_cache / "identities.json"
-    if bw.is_unlocked():
-        bw.write_identity_registry(_REGISTRY_FILE)
-    else:
-        _REGISTRY_FILE.write_text("{}")
+    _REGISTRY_FILE.write_text("{}")
     os.environ["MACHINE_SETUP_IDENTITY_REGISTRY"] = str(_REGISTRY_FILE)
 
-    if not args.quiet and run_textual_pickers(state, os_tag):
-        log("Pickers complete (Textual TUI)")
-    else:
+    pickers_ok = False
+    if not args.quiet:
+        pickers_ok = run_textual_pickers(state, os_tag, _REGISTRY_FILE)
+
+    if not pickers_ok:
+        # Fallback path: BW unlock + discovery + questionary pickers in steps.
+        step("OS detection")
+        log(f"OS tag: {os_tag}")
+
+        step("Bitwarden session")
+        if bw.have_bw():
+            bw.unlock()
+        else:
+            warn("bw CLI not installed yet — install will add it; re-run after.")
+
+        step("BW discovery")
+        if bw.is_unlocked():
+            bw.write_identity_registry(_REGISTRY_FILE)
+
         step("Identity selection")
         pick_identities(state, force=args.reconfigure, quiet=args.quiet)
-
         step("Per-identity auth")
         pick_auth(state, quiet=args.quiet)
-
         step("Component selection")
         pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
-
         step("Component configuration")
         prompt_component_config(state, os_tag, quiet=args.quiet)
 
