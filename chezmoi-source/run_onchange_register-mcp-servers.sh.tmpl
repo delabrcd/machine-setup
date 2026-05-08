@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Re-runs only when this file's content changes (chezmoi run_onchange_).
+# Registers MCP servers at user scope via the `claude` CLI.
+#
+# Which MCPs get registered is gated on MS_MCP_* env vars exported by the
+# machine-setup bootstrap's chezmoi component, set based on which mcp-*
+# components are in the resolved plan. Re-running the bootstrap with a
+# different selection re-renders this template (env var values bake in)
+# → hash changes → script re-runs → claude.json updated.
+#
+# Secrets are looked up via `bw get item` at runtime — NOT inlined by
+# chezmoi template expansion — so the rendered script that chezmoi
+# executes has no plaintext to leak via `chezmoi apply --verbose`,
+# `set -x`, or anything else that might echo the script body.
+#
+# Requires BW_SESSION to be exported (bw unlock --raw).
+
+set -euo pipefail
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "register-mcp-servers: 'claude' CLI not on PATH; skipping" >&2
+  exit 0
+fi
+
+MS_MCP_CONTEXT7={{ env "MS_MCP_CONTEXT7" | default "0" }}
+MS_MCP_BITBUCKET={{ env "MS_MCP_BITBUCKET" | default "0" }}
+MS_MCP_JIRA={{ env "MS_MCP_JIRA" | default "0" }}
+
+if [ "$MS_MCP_CONTEXT7" != "1" ] && [ "$MS_MCP_BITBUCKET" != "1" ] && [ "$MS_MCP_JIRA" != "1" ]; then
+  echo "register-mcp-servers: no MCPs enabled by machine-setup -- skipping"
+  exit 0
+fi
+
+if ! command -v bw >/dev/null 2>&1; then
+  echo "register-mcp-servers: 'bw' CLI not on PATH; skipping" >&2
+  exit 0
+fi
+
+if [ -z "${BW_SESSION:-}" ]; then
+  echo "register-mcp-servers: BW_SESSION not set; skipping" >&2
+  exit 0
+fi
+
+ITEM_JSON=$(bw get item "{{ .bitwarden_item }}") || {
+  echo "register-mcp-servers: BW lookup failed for item '{{ .bitwarden_item }}'" >&2
+  exit 1
+}
+
+field() {
+  python3 -c "
+import sys, json
+d = json.loads(sys.argv[1])
+print(next((f['value'] for f in d.get('fields', []) if f.get('name') == sys.argv[2]), ''))
+" "$ITEM_JSON" "$1"
+}
+
+if [ "$MS_MCP_CONTEXT7" = "1" ]; then
+  context7_api_key=$(field context7_api_key)
+  if [ -z "$context7_api_key" ]; then
+    echo "register-mcp-servers: context7_api_key missing in BW item -- skipping context7" >&2
+  else
+    claude mcp remove context7 -s user >/dev/null 2>&1 || true
+    claude mcp add --transport http --scope user \
+      context7 https://mcp.context7.com/mcp \
+      --header "CONTEXT7_API_KEY: $context7_api_key" >/dev/null
+    echo "  registered context7"
+  fi
+fi
+
+if [ "$MS_MCP_BITBUCKET" = "1" ]; then
+  # aashari/mcp-server-atlassian-bitbucket: email + scoped API token.
+  bitbucket_email=$(field bitbucket_email)
+  bitbucket_api_token=$(field bitbucket_api_token)
+  bitbucket_workspace=$(field bitbucket_workspace)
+  if [ -z "$bitbucket_email" ] || [ -z "$bitbucket_api_token" ]; then
+    echo "register-mcp-servers: bitbucket_email / bitbucket_api_token missing -- skipping bitbucket" >&2
+  else
+    claude mcp remove bitbucket -s user >/dev/null 2>&1 || true
+    bb_args=(
+      --scope user bitbucket
+      -e "ATLASSIAN_USER_EMAIL=$bitbucket_email"
+      -e "ATLASSIAN_API_TOKEN=$bitbucket_api_token"
+    )
+    [ -n "$bitbucket_workspace" ] && bb_args+=(-e "BITBUCKET_DEFAULT_WORKSPACE=$bitbucket_workspace")
+    claude mcp add "${bb_args[@]}" -- npx -y @aashari/mcp-server-atlassian-bitbucket >/dev/null
+    echo "  registered bitbucket (aashari)"
+  fi
+fi
+
+if [ "$MS_MCP_JIRA" = "1" ]; then
+  # Both server URL and PAT come from BW so the public repo carries no
+  # employer-specific data. Add 'jira_url' (e.g. https://jira.your-org.com)
+  # and 'jira_pat' to your "Claude Code MCP Secrets" item. The legacy field
+  # name 'jira_inficon_pat' is honored for backwards compat.
+  jira_url=$(field jira_url)
+  jira_pat=$(field jira_pat)
+  [ -z "$jira_pat" ] && jira_pat=$(field jira_inficon_pat)
+  if [ -z "$jira_pat" ]; then
+    echo "register-mcp-servers: jira_pat (or jira_inficon_pat) missing in BW -- skipping jira" >&2
+  elif [ -z "$jira_url" ]; then
+    echo "register-mcp-servers: jira_url missing in BW -- skipping jira" >&2
+  else
+    uvx_path=$(command -v uvx || true)
+    if [ -z "$uvx_path" ]; then
+      echo "register-mcp-servers: 'uvx' not found -- skipping jira (machine-setup uv component installs it)" >&2
+    else
+      claude mcp remove jira -s user >/dev/null 2>&1 || true
+      claude mcp add --scope user \
+        jira \
+        -e "JIRA_SERVER_URL=$jira_url" \
+        -e "JIRA_PERSONAL_TOKEN=$jira_pat" \
+        -- "$uvx_path" mcp-atlassian >/dev/null
+      echo "  registered jira"
+    fi
+  fi
+fi
+
+echo "register-mcp-servers: done"

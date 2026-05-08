@@ -4,9 +4,9 @@ Install-Winget -Id "twpayne.chezmoi" -Label "chezmoi"
 Sync-PathFromRegistry
 
 $cfg = Get-ComponentConfig
-$repo = $cfg.repo
-if (-not $repo) {
-    Write-Warn "chezmoi: no repo configured in [component_config.chezmoi].repo -- skipping apply"
+$source = if ($cfg.source) { $cfg.source } else { Join-Path $env:MACHINE_SETUP_DIR "chezmoi-source" }
+if (-not (Test-Path $source)) {
+    Write-Warn "chezmoi: source dir '$source' does not exist -- skipping apply"
     return
 }
 
@@ -26,11 +26,5 @@ $env:MS_MCP_BITBUCKET = _Has-Component "mcp-bitbucket"
 $env:MS_MCP_JIRA      = _Has-Component "mcp-jira"
 Write-Log "MCP flags for chezmoi: context7=$env:MS_MCP_CONTEXT7 bitbucket=$env:MS_MCP_BITBUCKET jira=$env:MS_MCP_JIRA"
 
-$chezmoiSrc = Join-Path $env:USERPROFILE ".local\share\chezmoi"
-if (Test-Path "$chezmoiSrc\.git") {
-    Write-Log "chezmoi source present -- applying ($repo)"
-    chezmoi apply --force
-} else {
-    Write-Log "Initialising chezmoi from $repo"
-    chezmoi init --apply --force $repo
-}
+Write-Log "Applying chezmoi from local source: $source"
+chezmoi apply --source $source --force

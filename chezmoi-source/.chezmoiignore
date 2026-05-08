@@ -1,0 +1,6 @@
+README.md
+{{ if eq .chezmoi.os "windows" -}}
+register-mcp-servers.sh
+{{ else -}}
+register-mcp-servers.ps1
+{{ end -}}

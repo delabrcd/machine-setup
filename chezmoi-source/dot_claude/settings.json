@@ -1,0 +1,14 @@
+{
+  "autoUpdatesChannel": "latest",
+  "theme": "dark",
+  "effortLevel": "high",
+  "permissions": {
+    "allow": [
+      "mcp__bitbucket"
+    ]
+  },
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
+}

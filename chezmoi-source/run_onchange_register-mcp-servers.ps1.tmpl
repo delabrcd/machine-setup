@@ -1,0 +1,113 @@
+# Re-runs only when this file's content changes (chezmoi run_onchange_).
+# Registers MCP servers at user scope via the `claude` CLI on Windows.
+# Selection gated on MS_MCP_* env vars from machine-setup's chezmoi component.
+#
+# Secrets are looked up via `bw get item` at runtime — NOT inlined by
+# chezmoi template expansion.
+#
+# Requires $env:BW_SESSION to be set (bw unlock --raw).
+
+$ErrorActionPreference = "Stop"
+
+if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+    Write-Warning "register-mcp-servers: 'claude' CLI not on PATH; skipping"
+    exit 0
+}
+
+$msContext7  = "{{ env "MS_MCP_CONTEXT7" | default "0" }}"
+$msBitbucket = "{{ env "MS_MCP_BITBUCKET" | default "0" }}"
+$msJira      = "{{ env "MS_MCP_JIRA" | default "0" }}"
+
+if ($msContext7 -ne "1" -and $msBitbucket -ne "1" -and $msJira -ne "1") {
+    Write-Host "register-mcp-servers: no MCPs enabled by machine-setup -- skipping"
+    exit 0
+}
+
+if (-not (Get-Command bw -ErrorAction SilentlyContinue)) {
+    Write-Warning "register-mcp-servers: 'bw' CLI not on PATH; skipping"
+    exit 0
+}
+
+if (-not $env:BW_SESSION) {
+    Write-Warning "register-mcp-servers: BW_SESSION not set; skipping"
+    exit 0
+}
+
+$itemJson = & { $ErrorActionPreference = "Continue"; bw get item "{{ .bitwarden_item }}" 2>$null }
+if (-not $itemJson) {
+    Write-Warning "register-mcp-servers: BW lookup failed for item '{{ .bitwarden_item }}'"
+    exit 1
+}
+
+$item = $itemJson | ConvertFrom-Json
+$fields = @{}
+foreach ($f in $item.fields) { $fields[$f.name] = $f.value }
+
+if ($msContext7 -eq "1") {
+    if (-not $fields["context7_api_key"]) {
+        Write-Warning "register-mcp-servers: context7_api_key missing -- skipping context7"
+    } else {
+        & { $ErrorActionPreference = "Continue"; claude mcp remove context7 -s user 2>&1 | Out-Null }
+        & { $ErrorActionPreference = "Continue"
+            claude mcp add --transport http --scope user `
+                context7 https://mcp.context7.com/mcp `
+                --header "CONTEXT7_API_KEY: $($fields['context7_api_key'])" 2>&1 | Out-Null
+        }
+        Write-Host "  registered context7"
+    }
+}
+
+if ($msBitbucket -eq "1") {
+    # aashari/mcp-server-atlassian-bitbucket via WSL — Windows host doesn't
+    # need Node installed, npx pulls aashari from npm in WSL on first call.
+    $bbEmail = $fields["bitbucket_email"]
+    $bbToken = $fields["bitbucket_api_token"]
+    $bbWs    = $fields["bitbucket_workspace"]
+    if (-not $bbEmail -or -not $bbToken) {
+        Write-Warning "register-mcp-servers: bitbucket_email / bitbucket_api_token missing -- skipping bitbucket"
+    } else {
+        & { $ErrorActionPreference = "Continue"; claude mcp remove bitbucket -s user 2>&1 | Out-Null }
+        $bbArgs = @(
+            "mcp", "add", "--scope", "user", "bitbucket",
+            "-e", "ATLASSIAN_USER_EMAIL=$bbEmail",
+            "-e", "ATLASSIAN_API_TOKEN=$bbToken"
+        )
+        if ($bbWs) { $bbArgs += @("-e", "BITBUCKET_DEFAULT_WORKSPACE=$bbWs") }
+        $wslEnvParts = @("ATLASSIAN_USER_EMAIL/u", "ATLASSIAN_API_TOKEN/u")
+        if ($bbWs) { $wslEnvParts += "BITBUCKET_DEFAULT_WORKSPACE/u" }
+        $bbArgs += @(
+            "-e", "WSLENV=$($wslEnvParts -join ':')",
+            "--", "wsl.exe", "-d", "Ubuntu", "--",
+            "bash", "-lc", "npx -y @aashari/mcp-server-atlassian-bitbucket"
+        )
+        & { $ErrorActionPreference = "Continue"; claude @bbArgs 2>&1 | Out-Null }
+        Write-Host "  registered bitbucket (aashari, via WSL)"
+    }
+}
+
+if ($msJira -eq "1") {
+    # Both server URL and PAT live in BW so nothing employer-specific is in
+    # the public repo. BW fields: jira_url (e.g. https://jira.your-org.com)
+    # + jira_pat. Legacy 'jira_inficon_pat' field is honored too.
+    $jiraUrl = $fields["jira_url"]
+    $jiraPat = $fields["jira_pat"]
+    if (-not $jiraPat) { $jiraPat = $fields["jira_inficon_pat"] }
+    if (-not $jiraPat) {
+        Write-Warning "register-mcp-servers: jira_pat (or jira_inficon_pat) missing -- skipping jira"
+    } elseif (-not $jiraUrl) {
+        Write-Warning "register-mcp-servers: jira_url missing in BW -- skipping jira"
+    } else {
+        & { $ErrorActionPreference = "Continue"; claude mcp remove jira -s user 2>&1 | Out-Null }
+        & { $ErrorActionPreference = "Continue"
+            claude mcp add --scope user `
+                jira `
+                -e "JIRA_SERVER_URL=$jiraUrl" `
+                -e "JIRA_PERSONAL_TOKEN=$jiraPat" `
+                -e "WSLENV=JIRA_SERVER_URL/u:JIRA_PERSONAL_TOKEN/u" `
+                -- wsl.exe -d Ubuntu -- bash -lc 'uvx mcp-atlassian' 2>&1 | Out-Null
+        }
+        Write-Host "  registered jira (via WSL)"
+    }
+}
+
+Write-Host "register-mcp-servers: done"

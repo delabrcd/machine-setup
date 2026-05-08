@@ -17,14 +17,17 @@ if ! command -v chezmoi >/dev/null 2>&1; then
     || { warn "chezmoi installation failed"; return 1; }
 fi
 
-# Pull config out of $COMPONENT_CONFIG_JSON
-_repo=$(printf '%s' "$COMPONENT_CONFIG_JSON" | python3 -c \
-  "import sys,json; print(json.load(sys.stdin).get('repo',''))")
+# The chezmoi source lives inside this repo at $MACHINE_SETUP_DIR/chezmoi-source.
+# Override via [component_config.chezmoi].source = "/path/to/dir" if you want
+# to point at a different source (e.g. a local/chezmoi-source overlay).
+_source=$(printf '%s' "$COMPONENT_CONFIG_JSON" | python3 -c \
+  "import sys,json; print(json.load(sys.stdin).get('source',''))")
+[ -z "$_source" ] && _source="$MACHINE_SETUP_DIR/chezmoi-source"
 _reset_key=$(printf '%s' "$COMPONENT_CONFIG_JSON" | python3 -c \
   "import sys,json; print(json.load(sys.stdin).get('reset_entry_key',''))")
 
-if [ -z "$_repo" ]; then
-  warn "chezmoi: no repo configured in [component_config.chezmoi].repo — skipping"
+if [ ! -d "$_source" ]; then
+  warn "chezmoi: source dir '$_source' does not exist — skipping"
   return 0
 fi
 
@@ -45,14 +48,9 @@ export MS_MCP_BITBUCKET=$(_has_component mcp-bitbucket)
 export MS_MCP_JIRA=$(_has_component mcp-jira)
 log "MCP flags for chezmoi: context7=$MS_MCP_CONTEXT7 bitbucket=$MS_MCP_BITBUCKET jira=$MS_MCP_JIRA"
 
-if [ -d "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/.git" ]; then
-  log "chezmoi source present; applying ($_repo)..."
-  if [ -n "$_reset_key" ]; then
-    chezmoi state delete --bucket=entryState --key="$_reset_key" >/dev/null 2>&1 || true
-  fi
-  chezmoi apply --force || warn "chezmoi apply had errors — config may be partially applied"
-else
-  log "Initialising chezmoi from $_repo..."
-  chezmoi init --apply --force "$_repo" \
-    || warn "chezmoi init failed — dotfiles not applied"
+log "Applying chezmoi from local source: $_source"
+if [ -n "$_reset_key" ]; then
+  chezmoi state delete --source "$_source" --bucket=entryState --key="$_reset_key" >/dev/null 2>&1 || true
 fi
+chezmoi apply --source "$_source" --force \
+  || warn "chezmoi apply had errors — config may be partially applied"
