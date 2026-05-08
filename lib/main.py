@@ -405,6 +405,13 @@ def main() -> int:
     state = json.loads(raw.stdout) if raw.stdout.strip() else {}
     state = migrate_legacy(state)
 
+    # Make sure bw is available before launching the TUI. On a fresh machine
+    # the Bitwarden CLI isn't installed yet — fetch it now so identity
+    # discovery actually finds something.
+    if not bw.have_bw():
+        log("Bitwarden CLI not installed; fetching the official binary...")
+        bw.ensure_installed()
+
     # Reserve a registry path; BW unlock + discovery run inside the Textual app
     # so the user sees the TUI as the very first interactive surface.
     global _REGISTRY_FILE

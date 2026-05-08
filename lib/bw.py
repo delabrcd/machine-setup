@@ -25,6 +25,135 @@ def have_bw() -> bool:
     return shutil.which("bw") is not None
 
 
+def ensure_installed() -> bool:
+    """If `bw` isn't on PATH, try to install it. Returns True if bw is
+    available afterward.
+
+    Linux/WSL: downloads the official prebuilt zip from GitHub releases into
+    ~/.local/bin (no sudo, no system package manager touched). The user can
+    `rm ~/.local/bin/bw` to remove it cleanly.
+
+    Windows: tries winget. If unavailable, returns False so the caller can
+    fall back to TOML-only identities.
+    """
+    if have_bw():
+        return True
+
+    user_bin = Path.home() / ".local" / "bin"
+    user_bin.mkdir(parents=True, exist_ok=True)
+    if str(user_bin) not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = str(user_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    if sys.platform == "win32":
+        return _install_bw_windows()
+    return _install_bw_unix(user_bin)
+
+
+def _install_bw_windows() -> bool:
+    if not shutil.which("winget"):
+        _warn("winget not available — install Bitwarden CLI manually from https://bitwarden.com/help/cli/")
+        return False
+    _log("Installing Bitwarden CLI via winget...")
+    rc = subprocess.call([
+        "winget", "install", "--id", "Bitwarden.CLI", "--silent",
+        "--accept-source-agreements", "--accept-package-agreements",
+    ])
+    # Refresh PATH from registry
+    import ctypes  # only on win32
+    try:
+        machine_path = subprocess.check_output(
+            ["reg", "query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "/v", "Path"],
+            text=True,
+        )
+        # crude parse — winget typically updates the env vars but the current
+        # process won't see them until refresh. Just merge what we have.
+        os.environ["PATH"] = (
+            os.environ.get("PATH", "")
+            + os.pathsep
+            + r"C:\Program Files\Bitwarden CLI"
+        )
+    except Exception:
+        pass
+    return have_bw()
+
+
+def _install_bw_unix(user_bin: Path) -> bool:
+    import io, json, urllib.request, zipfile
+
+    arch = "linux"
+    # bitwarden ships only x64 prebuilt for linux as of 2025; arm64 users would
+    # need npm or snap. Detect and bail out for non-x64 arches.
+    machine = (subprocess.check_output(["uname", "-m"], text=True).strip()
+               if shutil.which("uname") else "x86_64")
+    if machine not in ("x86_64", "amd64"):
+        _warn(f"No prebuilt bw binary for {machine}. Install via: npm i -g @bitwarden/cli")
+        return False
+
+    _log("Installing Bitwarden CLI...")
+    # Find the latest cli-v* tag
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/bitwarden/clients/releases?per_page=40",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "machine-setup"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            releases = json.loads(resp.read())
+    except Exception as e:
+        _warn(f"Could not fetch BW CLI releases ({e})")
+        return False
+
+    version: str | None = None
+    asset_url: str | None = None
+    for r in releases:
+        tag = r.get("tag_name", "")
+        if not tag.startswith("cli-v"):
+            continue
+        ver = tag[len("cli-v"):]
+        for a in r.get("assets") or []:
+            name = a.get("name", "")
+            if name == f"bw-oss-{arch}-{ver}.zip" or name == f"bw-{arch}-{ver}.zip":
+                version = ver
+                asset_url = a.get("browser_download_url")
+                break
+        if asset_url:
+            break
+
+    if not asset_url:
+        _warn("No bw-linux zip found in recent releases")
+        return False
+
+    _log(f"  downloading {asset_url}")
+    try:
+        with urllib.request.urlopen(asset_url, timeout=60) as resp:
+            data = resp.read()
+    except Exception as e:
+        _warn(f"Download failed ({e})")
+        return False
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # The zip contains a single `bw` executable
+            for name in zf.namelist():
+                if name.endswith("bw") or name == "bw":
+                    member = zf.read(name)
+                    target = user_bin / "bw"
+                    target.write_bytes(member)
+                    target.chmod(0o755)
+                    break
+            else:
+                _warn("zip did not contain a bw binary")
+                return False
+    except Exception as e:
+        _warn(f"Extraction failed ({e})")
+        return False
+
+    if have_bw():
+        _log(f"  bw installed: {shutil.which('bw')} (version {version})")
+        return True
+    _warn("bw still not on PATH after install")
+    return False
+
+
 def status() -> dict:
     """Returns parsed `bw status` JSON, or {} if bw is unavailable/errors."""
     if not have_bw():
