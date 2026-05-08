@@ -1,13 +1,7 @@
 name = "mcp-jira"
-description = "Register the Jira MCP (sooperset/mcp-atlassian via uvx) with Claude Code"
+description = "Enable the Jira MCP (sooperset/mcp-atlassian via uvx) for Claude Code"
 supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
-# uv is needed because mcp-atlassian runs via `uvx mcp-atlassian`.
-depends_on = ["claude-code", "bw-cli", "uv"]
-runs_after = ["chezmoi"]
+# Signal-only. chezmoi handles registration + BW secret extraction; uv is
+# needed at MCP-call time for `uvx`.
+depends_on = ["claude-code", "chezmoi", "uv"]
 per_identity = false
-
-# Override via [component_config.mcp-jira] in machine.toml:
-#   bw_item       = "Claude Code MCP Secrets"
-#   bw_url_field  = "jira_url"             # e.g. https://yourorg.atlassian.net
-#   bw_pat_field  = "jira_personal_token"  # PAT or API token
-#   scope         = "user"

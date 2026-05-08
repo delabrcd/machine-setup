@@ -28,6 +28,23 @@ if [ -z "$_repo" ]; then
   return 0
 fi
 
+# Expose MCP-component selection to chezmoi templates as env vars.
+# claude-config's run_onchange_register-mcp-servers.sh.tmpl reads these to
+# decide which `claude mcp add` calls to emit, and pulls the secrets from
+# Bitwarden via chezmoi's bitwardenFields template functions (no shell-side
+# secret handling here — that was the old, fragile path).
+_has_component() {
+  printf '%s' "$PLAN_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('1' if any(c.get('name')=='$1' for c in d.get('components', [])) else '0')
+"
+}
+export MS_MCP_CONTEXT7=$(_has_component mcp-context7)
+export MS_MCP_BITBUCKET=$(_has_component mcp-bitbucket)
+export MS_MCP_JIRA=$(_has_component mcp-jira)
+log "MCP flags for chezmoi: context7=$MS_MCP_CONTEXT7 bitbucket=$MS_MCP_BITBUCKET jira=$MS_MCP_JIRA"
+
 if [ -d "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/.git" ]; then
   log "chezmoi source present; applying ($_repo)..."
   if [ -n "$_reset_key" ]; then

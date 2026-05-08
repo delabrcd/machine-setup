@@ -1,12 +1,7 @@
 name = "mcp-bitbucket"
-description = "Register aashari/mcp-server-atlassian-bitbucket as the Bitbucket MCP"
+description = "Enable the Bitbucket MCP (aashari/mcp-server-atlassian-bitbucket) for Claude Code"
 supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
-depends_on = ["claude-code", "bw-cli", "nvm"]
-runs_after = ["chezmoi"]
+# Signal-only. chezmoi handles registration + BW secret extraction; nvm is
+# needed at MCP-call time for `npx`.
+depends_on = ["claude-code", "chezmoi", "nvm"]
 per_identity = false
-
-# Override item name / field names via [component_config.mcp-bitbucket] in machine.toml:
-#   bw_item              = "Claude Code MCP Secrets"
-#   bw_username_field    = "bitbucket_username"
-#   bw_token_field       = "bitbucket_api_token"
-#   scope                = "user"
