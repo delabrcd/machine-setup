@@ -239,11 +239,13 @@ class ComponentScreen(Screen):
         Binding("escape", "back",    "Back"),
     ]
 
-    def __init__(self, required: list[str], optional: list[dict], selected: list[str]):
+    def __init__(self, required: list[str], optional: list[dict], selected: list[str], identities: list[str], os_tag: str):
         super().__init__()
         self.required = required
         self.optional = optional
         self._initial = set(selected)
+        self.identities = identities
+        self.os_tag = os_tag
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -251,13 +253,10 @@ class ComponentScreen(Screen):
             yield Static("Step 3 of 4 — Components", classes="step")
             yield Static(
                 "Required components are auto-installed. Toggle optional ones below.\n"
-                "Selecting an optional with deps (e.g. chezmoi → uv) auto-pulls them in.\n"
+                "Selecting an optional with deps auto-pulls them in (visible in the preview).\n"
                 "Space to toggle, Ctrl+S to continue.",
                 classes="hint",
             )
-            yield Static("Required (auto-installed):", classes="section-title")
-            yield Static("  " + (", ".join(self.required) if self.required else "(none)"), classes="required-list")
-            yield Static("\nOptional:", classes="section-title")
             options = [
                 Selection(
                     f"{c['name']:<22} {c.get('description','')[:60]}",
@@ -270,7 +269,79 @@ class ComponentScreen(Screen):
                 yield SelectionList[str](*options, id="comp-list")
             else:
                 yield Static("(no optional components for this OS)", classes="hint")
+            yield Static("", id="plan-preview", classes="plan-preview")
         yield Footer()
+
+    def on_mount(self) -> None:
+        self._refresh_preview()
+
+    def on_selection_list_selected_changed(self, _event) -> None:
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        try:
+            sl: SelectionList = self.query_one("#comp-list", SelectionList)
+            user_picks = list(sl.selected)
+        except Exception:
+            user_picks = []
+
+        # Resolve the full set that would actually install given current picks.
+        explicit = list(set(self.required) | set(user_picks))
+        profile = {
+            "name": "_preview",
+            "components": explicit,
+            "identities": self.identities,
+            "component_config": {},
+        }
+        try:
+            resolved = config.resolve_components(profile, self.os_tag)
+            full_names = [c["name"] for c in resolved]
+        except Exception as e:
+            full_names = explicit
+            self.query_one("#plan-preview", Static).update(f"[red]preview error: {e}[/]")
+            return
+
+        required_set = set(self.required)
+        user_set = set(user_picks)
+        auto_only = [n for n in full_names if n not in required_set and n not in user_set]
+
+        # Compute "auto-pulled by which" so the user understands the chain.
+        # For each auto, walk through user_picks + required and see whose
+        # depends_on graph reaches it.
+        attribution: dict[str, list[str]] = {n: [] for n in auto_only}
+        try:
+            for picked in user_picks:
+                stack = [picked]
+                seen = {picked}
+                while stack:
+                    cur = stack.pop()
+                    manifest = config.load_component_manifest(cur)
+                    for dep in manifest.get("depends_on") or []:
+                        if dep in seen:
+                            continue
+                        seen.add(dep)
+                        stack.append(dep)
+                        if dep in attribution:
+                            attribution[dep].append(picked)
+        except Exception:
+            pass
+
+        lines = ["[bold]Plan preview:[/]"]
+        if self.required:
+            lines.append(f"  [green]Required[/]    : {', '.join(self.required)}")
+        if user_picks:
+            lines.append(f"  [yellow]Your picks[/]  : {', '.join(user_picks)}")
+        if auto_only:
+            parts = []
+            for name in auto_only:
+                via = attribution.get(name) or []
+                via_txt = f" (via {', '.join(via)})" if via else ""
+                parts.append(f"{name}{via_txt}")
+            lines.append(f"  [cyan]Auto-pulled[/] : {', '.join(parts)}")
+        if not user_picks and not auto_only:
+            lines.append("  (only required components will install)")
+
+        self.query_one("#plan-preview", Static).update("\n".join(lines))
 
     def action_advance(self) -> None:
         try:
@@ -353,10 +424,66 @@ class ConfigScreen(Screen):
             if val:
                 out.setdefault(comp, {})[field] = val
         self.app.state["component_config"] = out
-        self.app.exit({"action": "done", "state": self.app.state})
+        self.app.advance_to_sudo()
 
     def action_back(self) -> None:
         self.app.advance_to_components()
+
+
+# ── Sudo screen ─────────────────────────────────────────────────────────────
+
+class SudoScreen(Screen):
+    """Capture the sudo password once + cache via `sudo -S -v` so component
+    scripts (apt/dnf/pacman/etc.) don't prompt during the install run."""
+
+    BINDINGS = [
+        Binding("escape", "skip", "Skip (sudo will prompt during install)"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Sudo", classes="step")
+            yield Static(
+                "System packages need sudo. Enter your sudo password to cache it for the install,\n"
+                "or press Esc to skip and let sudo prompt during the install (uglier).",
+                classes="hint",
+            )
+            yield Input(password=True, placeholder="sudo password", id="sudo-pw")
+            yield Static(id="sudo-status", classes="status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#sudo-pw", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "sudo-pw":
+            return
+        pw = event.value
+        self.query_one("#sudo-status", Static).update("Validating...")
+        self.run_worker(self._cache_sudo(pw), thread=True, exclusive=True)
+
+    async def _cache_sudo(self, pw: str) -> None:
+        import subprocess as sp
+        proc = sp.run(
+            ["sudo", "-S", "-v"],
+            input=pw + "\n",
+            capture_output=True, text=True,
+        )
+        status: Static = self.query_one("#sudo-status", Static)
+        if proc.returncode == 0:
+            self.app.state["_sudo_cached"] = True
+            self.app.call_from_thread(
+                self.app.exit,
+                {"action": "done", "state": self.app.state},
+            )
+        else:
+            self.app.call_from_thread(status.update, "Wrong password — try again, or Esc to skip.")
+            self.app.call_from_thread(self.query_one("#sudo-pw", Input).focus)
+
+    def action_skip(self) -> None:
+        self.app.state["_sudo_cached"] = False
+        self.app.exit({"action": "done", "state": self.app.state})
 
 
 # ── App ─────────────────────────────────────────────────────────────────────
@@ -435,7 +562,12 @@ class BootstrapApp(App):
         required = config._required_components(self.state.get("identities") or [], self.os_tag)
         optional = [c for c in self.all_components if c["name"] not in set(required)]
         self.pop_screen()
-        self.push_screen(ComponentScreen(required, optional, self.state.get("extra_components") or []))
+        self.push_screen(ComponentScreen(
+            required, optional,
+            self.state.get("extra_components") or [],
+            self.state.get("identities") or [],
+            self.os_tag,
+        ))
 
     def advance_to_config(self) -> None:
         plan = driver.build_plan(
@@ -448,6 +580,30 @@ class BootstrapApp(App):
         names = [c["name"] for c in plan["components"]]
         self.pop_screen()
         self.push_screen(ConfigScreen(names, self.state.get("component_config") or {}))
+
+    def advance_to_sudo(self) -> None:
+        # Skip on Windows + when running as root + when sudo is already cached.
+        skip = False
+        if sys.platform == "win32":
+            skip = True
+        elif hasattr(os, "geteuid") and os.geteuid() == 0:
+            skip = True
+        else:
+            import subprocess as sp
+            # `sudo -n -v` exits 0 if cached or NOPASSWD; non-zero otherwise.
+            try:
+                rc = sp.call(["sudo", "-n", "-v"], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+                if rc == 0:
+                    skip = True
+                    self.state["_sudo_cached"] = True
+            except FileNotFoundError:
+                # No sudo binary at all — also skip
+                skip = True
+        if skip:
+            self.exit({"action": "done", "state": self.state})
+            return
+        self.pop_screen()
+        self.push_screen(SudoScreen())
 
 
 # ── Entrypoint ──────────────────────────────────────────────────────────────

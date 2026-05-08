@@ -464,16 +464,17 @@ def main() -> int:
         warn("Failed to persist machine.toml")
     log(f"Saved selections to {config_file}")
 
-    # Pre-cache sudo so component scripts (apt/dnf/pacman, etc.) don't prompt
-    # mid-plan. One prompt up front rather than scattered ones during long
-    # installs. Skipped on Windows (no sudo) and when already root.
+    # Pre-cache sudo only when the TUI didn't already do it. (TUI sets
+    # state["_sudo_cached"] when it captured + cached the password via the
+    # SudoScreen.) Fallback for the questionary path or non-TTY runs.
     if (
-        shutil.which("sudo")
+        not state.get("_sudo_cached")
+        and shutil.which("sudo")
         and hasattr(os, "geteuid")
         and os.geteuid() != 0
     ):
         step("Sudo")
-        log("Caching sudo credentials (one prompt for the whole bootstrap)...")
+        log("Caching sudo credentials...")
         rc = subprocess.call(["sudo", "-v"])
         if rc != 0:
             warn("sudo -v failed — components needing sudo may re-prompt during install")
