@@ -1,56 +1,46 @@
 # machine-setup
 
-Profile-driven, modular bootstrap for any Linux distro, Windows host, or
-WSL combo. Pick a profile (or define your own), and the bootstrap walks a
-dependency-ordered list of components — installing packages, restoring
-SSH keys from Bitwarden, configuring git identities, applying dotfiles, etc.
+Identity-first, modular bootstrap for any Linux distro, Windows host, or
+WSL combo. Pick which **identities** to install on this machine, configure
+their **per-host auth**, and the bootstrap derives the required components
++ lets you toggle optional ones.
 
-The same profile works on multiple OSes: each component declares which
-OS tags it supports (`linux-ubuntu`, `linux-fedora`, `linux-arch`, `wsl`,
-`windows`), and the resolver filters automatically.
+Identities (SSH keys + git config + per-host auth) live in **Bitwarden**.
+The public repo carries no personal data; configuration syncs across
+machines via your vault.
 
 ## Anatomy
 
 ```
-profiles/<name>.toml             # generic templates (components, no identities)
-components/<name>/
-    manifest.toml                # name, supported OSes, deps, per_identity flag
-    linux.sh                     # Linux/WSL implementation (optional)
-    windows.ps1                  # Windows implementation (optional)
-local/                           # gitignored overlay — per-machine private bindings
-    profiles/<name>.toml         # OPTIONAL — overrides BW-stored profile of same name
-    identities/<name>.toml       # OPTIONAL — TOML fallback if you don't use BW
+components/<name>/                    # the building blocks
+    manifest.toml                     # supported OSes, deps, per_identity flag
+    linux.sh                          # Linux/WSL implementation (optional)
+    windows.ps1                       # Windows implementation (optional)
+local/                                # gitignored — per-machine private bindings
+    identities/<name>.toml            # OPTIONAL — TOML fallback if you don't use BW
+    components/<name>/                # OPTIONAL — per-host component overrides
 
-Bitwarden                        # cross-machine sync, no manual file copy
-    "Machine Profile: <name>"    # Secure Note whose body is the profile TOML
-    "Machine Identity: <name>"   # SSH key + git_name/email/applies_to fields
+Bitwarden                             # canonical cross-machine config
+    "Machine Identity: <name>"        # SSH key + git_name/email/applies_to fields
+
+~/.config/machine-setup/machine.toml  # the only persisted state per machine:
+                                      #   identities (which to install)
+                                      #   extra_components (optional toggles)
+                                      #   identity_overrides (per-host helper)
+                                      #   component_config (chezmoi.repo etc.)
 ```
 
-**Profile precedence at lookup time:** `local/` > Bitwarden > `repo/`. So
-on-disk overrides win even if a BW profile by the same name exists.
-
-**Identities live in Bitwarden.** Each identity is a BW item named
-`Machine Identity: <name>` with these fields:
+**Identities are Bitwarden Secure Notes** named `Machine Identity: <name>`:
 
 | Field              | Type   | What it is                                              |
 | ------------------ | ------ | ------------------------------------------------------- |
 | `git_name`         | text   | git `user.name`                                         |
 | `git_email`        | text   | git `user.email`                                        |
 | `ssh_key_basename` | text   | optional, defaults to `id_ed25519_<name>`               |
-| `default`          | text   | `"true"` for the global default identity (one per host) |
+| `default`          | text   | `"true"` for the global default identity                |
 | `applies_to_json`  | text   | JSON: `[{"host":"...","git_url_patterns":[...],"credential_helper":"ssh|gcm|bitwarden|none"}]` |
 | `public_key`       | text   | OpenSSH `ssh-ed25519 AAAA...`                           |
 | `private_key`      | hidden | OpenSSH private key                                     |
-
-The bootstrap discovers these at runtime, shows a picker pre-checked
-according to the active profile, and saves your selection to
-`~/.config/machine-setup/machine.toml`. The public repo carries no
-identity data.
-
-`local/` always wins for profiles. Drop work-only profile bindings
-(chezmoi repo URL, dev-utilities repo URL, etc.) there and the public
-repo stays generic. See [`local/README.md`](local/README.md) for a
-worked example.
 
 ## One-liners (fresh machine)
 
@@ -67,152 +57,114 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 irm https://raw.githubusercontent.com/delabrcd/machine-setup/main/install.ps1 | iex
 ```
 
-Both installers do the minimum to get `git` available, clone this repo to
+Both installers ensure `git` is present, clone this repo to
 `~/.local/share/machine-setup`, and hand off to `bootstrap.sh` /
-`bootstrap.ps1`. Set `MACHINE_SETUP_PROFILE` first to pre-pick a profile
-and skip the TUI — handy for VM/CI setups.
+`bootstrap.ps1`.
 
 ## Re-runs
 
 ```sh
-bash ~/.local/share/machine-setup/bootstrap.sh                # uses saved profile + components
-bash ~/.local/share/machine-setup/bootstrap.sh --reconfigure  # re-pick both
-bash ~/.local/share/machine-setup/bootstrap.sh --quiet        # use profile defaults, skip component picker
-MACHINE_SETUP_PROFILE=personal-server bash bootstrap.sh        # scripted profile
-MACHINE_SETUP_COMPONENTS=packages,nvm,claude-code bash bootstrap.sh  # scripted component subset
-```
-
-```powershell
-& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1"             # uses saved choices
-& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1" -Reconfigure
-& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1" -Quiet
-$env:MACHINE_SETUP_PROFILE = "windows-desktop"
-& "$env:USERPROFILE\.local\share\machine-setup\bootstrap.ps1"
+bash ~/.local/share/machine-setup/bootstrap.sh                # uses saved selections
+bash ~/.local/share/machine-setup/bootstrap.sh --reconfigure  # re-prompt every picker
+bash ~/.local/share/machine-setup/bootstrap.sh --quiet        # skip pickers; use saved
+MACHINE_SETUP_IDENTITIES=personal,work bash bootstrap.sh       # env-pin identities
+MACHINE_SETUP_COMPONENTS=claude-code,uv bash bootstrap.sh      # env-pin extras
 ```
 
 ## First-run flow
 
-1. **Profile picker** — pick one of `profiles/*.toml` (or `local/profiles/*.toml`).
-2. **Component picker** — every component supported by the current OS is shown,
-   pre-checked according to the chosen profile. Toggle individual ones on/off.
-   The resolver pulls transitive deps in automatically — selecting just
-   `claude-code` will quietly pull in `packages`.
-3. **Bitwarden unlock** — fired if either (a) the plan has a BW-using
-   component, or (b) we want to discover identities from BW (default).
-4. **Identity picker** — every BW item named `Machine Identity: *` (plus any
-   `local/identities/<name>.toml`) shows up. Pre-checked according to the
-   profile. Toggle which identities should be installed on this machine.
-5. **Run** — components execute in dependency order; per-identity components
-   loop over the chosen identities.
+1. **Bitwarden unlock + identity discovery** — vault unlocked early; every
+   `Machine Identity: *` item is listed.
+2. **Identity picker** — pick which identities to install. Includes a
+   `[+] Create a new identity in Bitwarden...` entry that drops into a
+   wizard (name, email, host, helper, generates ed25519, stores in BW).
+3. **Per-identity auth picker** — for each chosen identity-host pair,
+   confirm or override the credential helper (`ssh` / `gcm` / `bitwarden` /
+   `none`). Override is per-machine, so the same identity can use SSH at
+   home and GCM on a work box.
+4. **Component picker** — required components are derived from your
+   identity choices (`packages`, `git-base`, `git-identity`, `bw-cli`,
+   `ssh-key`, `credential-helpers`) and shown as info. Optional components
+   are toggleable: `claude-code`, `chezmoi`, `uv`, `dev-utilities`,
+   `bitbucket-mcp`, `wsl-bootstrap`, `bw-unlock-shell`, etc.
+5. **Component configuration** — for any selected optional component that
+   needs it (`chezmoi.repo`, `dev-utilities.repo`, etc.), prompts for the
+   value if not already saved.
+6. **Run** — components execute in dependency order; per-identity
+   components loop over each selected identity.
 
-`--quiet` (Linux: `-q`) skips the component + identity pickers and uses the
-profile's lists as-is. All three choices (profile / components / identities)
-persist to `~/.config/machine-setup/machine.toml` (or
-`%USERPROFILE%\.config\...` on Windows). Re-pick with `--reconfigure`.
-
-## Built-in profiles
-
-All in-repo profiles ship with `identities = []` — pick which BW
-identities to install at runtime via the picker.
-
-| Profile          | OS targets        | What it sets up                                  |
-| ---------------- | ----------------- | ------------------------------------------------ |
-| `minimal`        | Linux/WSL         | Just packages + Claude Code (no identity work)   |
-| `linux-server`   | Linux/WSL         | + BW SSH key, git config, credential helpers     |
-| `linux-desktop`  | Linux/WSL         | + uv + chezmoi (configure repo via local/)       |
-| `windows-host`   | Windows + WSL     | Windows-side ident, then delegates to WSL bootstrap |
-
-Define your own in `profiles/<name>.toml` (or `local/profiles/<name>.toml`).
+All decisions persist to `~/.config/machine-setup/machine.toml`. Re-pick
+with `--reconfigure`, edit the file directly, or delete it to start fresh.
 
 ## Available components
 
-| Name                  | What it does                                            | Per-identity |
-| --------------------- | ------------------------------------------------------- | ------------ |
-| `packages`            | Base system packages (apt/dnf/pacman/winget)            | no           |
-| `nvm`                 | nvm + Node LTS                                          | no           |
-| `bw-cli`              | Bitwarden CLI                                           | no           |
-| `uv`                  | uv (Astral) Python runner                               | no           |
-| `claude-code`         | Anthropic Claude Code CLI (native installer on each OS) | no           |
-| `chezmoi`             | Apply a configured dotfiles repo                        | no           |
-| `git-base`            | Identity-agnostic git config + ssh-agent service        | no           |
-| `git-identity`        | user.name/email/signing-key (with `includeIf` for non-defaults) | yes  |
-| `ssh-key`             | Restore-from-BW or generate-and-store SSH keypair       | yes          |
-| `credential-helpers`  | HTTPS helpers per identity (`gcm`, `bitwarden`, `ssh`)  | yes          |
-| `bw-unlock-shell`     | Per-session `bw-unlock` function in shell rc / PS profile | no         |
-| `wsl-interop`         | Re-register WSLInterop binfmt (WSL only)                | no           |
-| `wsl-bootstrap`       | From Windows host: invoke bootstrap.sh inside WSL       | no           |
-| `dev-utilities`       | Clone/reset an arbitrary git repo at a configured path  | no           |
-| `bitbucket-mcp`       | `npm install && npm run build` in a configured dir      | no           |
+| Name                 | What it does                                            | Per-identity |
+| -------------------- | ------------------------------------------------------- | ------------ |
+| `packages`           | Base system packages (apt/dnf/pacman/winget)            | no           |
+| `nvm`                | nvm + Node LTS                                          | no           |
+| `bw-cli`             | Bitwarden CLI                                           | no           |
+| `uv`                 | uv (Astral) Python runner                               | no           |
+| `claude-code`        | Anthropic Claude Code CLI (native installer on each OS) | no           |
+| `chezmoi`            | Apply a configured dotfiles repo                        | no           |
+| `git-base`           | Identity-agnostic git config + ssh-agent service        | no           |
+| `git-identity`       | user.name/email/signing-key (with `includeIf` for non-defaults) | yes  |
+| `ssh-key`            | Restore-from-BW or generate-and-store SSH keypair       | yes          |
+| `credential-helpers` | HTTPS helpers per identity (`gcm`, `bitwarden`, `ssh`)  | yes          |
+| `bw-unlock-shell`    | Per-session `bw-unlock` function in shell rc / PS profile | no         |
+| `wsl-interop`        | Re-register WSLInterop binfmt (WSL only)                | no           |
+| `wsl-bootstrap`      | From Windows host: invoke bootstrap.sh inside WSL       | no           |
+| `dev-utilities`      | Clone/reset an arbitrary git repo at a configured path  | no           |
+| `bitbucket-mcp`      | `npm install && npm run build` in a configured dir      | no           |
 
 Add your own component as a directory under `components/<name>/` with a
-`manifest.toml`. If a component has no script for the current OS the runner
-just skips it (so a Linux-only component is safe to list in a profile that
-also runs on Windows).
-
-## How identities work
-
-A profile names one or more identities (e.g. `["personal", "work"]`).
-Components flagged `per_identity = true` run once per identity, with
-`IDENT_NAME`, `IDENT_GIT_NAME`, `IDENT_GIT_EMAIL`, `IDENT_BW_SSH_ITEM`,
-`IDENT_DEFAULT`, and `IDENT_APPLIES_TO_JSON` set in the environment.
-
-Exactly one identity per profile is the **default** (`default = true` in
-the identity file). Its name/email/signing-key go into global git config.
-Non-default identities get `includeIf` rules that activate them when the
-working repo's remote URL matches one of their `git_url_patterns` —
-classic per-host, per-identity git setup, but driven by config instead of
-hardcoded.
-
-The big payoff: a personal-only profile literally does not name any
-work-related Bitwarden item, SSH key, repo URL, or email address
-anywhere in its execution path. You can't accidentally install a work
-key on a personal machine because there's nowhere for that intent to
-hide.
+`manifest.toml`. Components without a script for the current OS are
+skipped silently.
 
 ## Adding a new identity
 
-### Option 1: directly in the Bitwarden web UI
+### Option 1: from the bootstrap picker
 
-1. Create a Secure Note named `Machine Identity: <yourname>`.
-2. Add custom fields (text, except `private_key` which is hidden):
-   `git_name`, `git_email`, `default` (`"true"` or `"false"`),
-   `applies_to_json` (see below), `public_key`, `private_key`.
-3. Save. Bootstrap will pick it up on next run via the identity picker.
-
-`applies_to_json` example for a personal GitHub identity that uses SSH:
-
-```json
-[
-  {
-    "host": "github.com",
-    "git_url_patterns": ["git@github.com:*/*", "https://github.com/*/*"],
-    "credential_helper": "ssh"
-  }
-]
-```
+The identity picker has a `[+] Create a new identity in Bitwarden...`
+entry. Pick it and answer the prompts; the wizard generates the SSH key
+and stores everything in BW.
 
 ### Option 2: from the CLI
 
 ```sh
 export BW_SESSION="$(bw unlock --raw)"
 
-# Interactive — prompts for name/email/host/helper, generates SSH key,
-# stores in BW with all fields:
+# Interactive — prompts for name/email/host/helper:
 ./tools/seed-bw-identity.sh new personal
 
-# Or migrate an existing identities/<name>.toml + an existing SSH key item:
+# Migrate an existing local TOML + existing standalone BW SSH-key item:
 ./tools/seed-bw-identity.sh from-toml local/identities/work.toml \
     --ssh-from "Machine SSH Key Work"
 ```
 
-Both forms upsert idempotently — re-running updates fields in place.
+PowerShell equivalents at `tools\seed-bw-identity.ps1`.
 
-### Option 3: TOML fallback (no Bitwarden)
+### Option 3: directly in the Bitwarden web UI
 
-Create `local/identities/<name>.toml` with the same shape as the
-identity registry. The bootstrap loads it if no BW item matches. This
-works for the SSH key fields too — point `bw_ssh_item` at any existing
-BW SSH-key item to keep using one.
+Create a Secure Note named `Machine Identity: <yourname>` with the
+fields listed above. `applies_to_json` example:
+
+```json
+[{"host":"github.com","git_url_patterns":["git@github.com:*/*","https://github.com/*/*"],"credential_helper":"ssh"}]
+```
+
+## Per-machine identity overrides
+
+When the same identity needs different auth on different machines (your
+personal identity uses SSH at home but GCM on the work box), the per-
+identity auth picker handles it on first run. The override lives in
+this machine's `machine.toml`:
+
+```toml
+[identity_overrides.personal."github.com"]
+credential_helper = "gcm"
+```
+
+Re-run `bootstrap.sh --reconfigure` to re-pick auth methods.
 
 ## Private keys never on disk
 
@@ -224,92 +176,36 @@ storage), and the temp file is immediately deleted.
 
 The `ssh-key` component also auto-generates a fresh ed25519 key the
 first time it can't find a BW item for an identity, then stores it back
-in BW — same flow as before.
-
-## Storing profiles in Bitwarden (one-command remote setup)
-
-If you keep your private profiles (`work-desktop`, etc.) in Bitwarden,
-a fresh machine just needs the public one-liner — bootstrap unlocks BW,
-discovers the profile, and shows it in the picker. No manual file copy.
-
-```sh
-# Push a local profile to Bitwarden (one-time, from any existing machine):
-export BW_SESSION="$(bw unlock --raw)"
-./tools/seed-bw-profile.sh push local/profiles/work-desktop.toml
-
-# List what's in BW:
-./tools/seed-bw-profile.sh list
-
-# Pull (e.g. to edit locally and push back):
-./tools/seed-bw-profile.sh pull work-desktop > /tmp/work.toml
-$EDITOR /tmp/work.toml
-./tools/seed-bw-profile.sh push /tmp/work.toml
-```
-
-PowerShell equivalents at `tools\seed-bw-profile.ps1`.
-
-The bootstrap creates BW Secure Notes named `Machine Profile: <name>`
-with the TOML content as the note body — you can also create/edit them
-through the BW web UI directly.
-
-## Per-profile identity overrides
-
-When the same identity needs different behavior on different machines
-(typical case: personal identity uses SSH at home but GCM on a work
-laptop where corporate SSO gates GitHub), declare an override in the
-profile:
-
-```toml
-# local/profiles/work-desktop.toml
-[[identity_overrides.personal.applies_to]]
-host = "github.com"
-credential_helper = "gcm"
-```
-
-The override is merged on top of the identity's existing applies_to
-entry that matches by `host`. If no entry matches, it's appended.
-Top-level identity fields (e.g. `ssh_key_basename`) can also be
-overridden via `[identity_overrides.<name>]` directly.
+in BW.
 
 ## Bitwarden credential helper (HTTPS auth)
 
 For hosts that auth via username/api-token (corporate Bitbucket etc.),
-declare on the identity's `applies_to` entry:
+declare on the identity's `applies_to` entry (in `applies_to_json`):
 
-```toml
-credential_helper  = "bitwarden"
-bw_credential_item = "Some BW Item"
-bw_username_field  = "username"
-bw_password_field  = "api_token"
+```json
+{
+  "host": "bitbucket.org",
+  "credential_helper": "bitwarden",
+  "bw_credential_item": "Some BW Item",
+  "bw_username_field": "username",
+  "bw_password_field": "api_token"
+}
 ```
 
 Currently Linux/WSL only.
 
-## Auth scheme conventions
+## Bootstrap a remote machine
 
-GitHub supports both SSH and HTTPS-with-GCM. Pick per identity:
+`tools/install-remote.sh <host>` (and `.ps1`) handles a remote setup in
+one command: installs git, clones the public repo, tar-pipes your
+`local/` overlay over SSH, runs the bootstrap interactively (BW prompt,
+key registration pause, etc. all flow through the SSH TTY).
 
-| Identity kind | Recommended `credential_helper` | Why                                                          |
-| ------------- | -------------------------------- | ------------------------------------------------------------ |
-| Personal      | `ssh`                            | Simpler — your SSH key is already in agent for signing       |
-| Work          | `gcm`                            | Many corporate GitHub orgs require SSO via the OAuth flow    |
+```sh
+./tools/install-remote.sh desktop
+```
 
-Bitbucket only supports SSH for git auth (corporate Bitbucket dropped app
-passwords); use `credential_helper = "ssh"` and make sure the identity's
-SSH key is registered at `https://bitbucket.org/account/settings/ssh-keys/`.
-
-The `credential-helpers` component reads `applies_to[].credential_helper`
-per host, so one identity can use SSH for github.com and `bitwarden` for a
-private host that takes username/api-token. See
-[`components/credential-helpers/manifest.toml`](components/credential-helpers/manifest.toml)
-for all options.
-
-## Adding work / private overlay
-
-See [`local/README.md`](local/README.md). TL;DR:
-
-1. `local/identities/work.toml` — work git identity + BW SSH item name + applies_to.
-2. `local/profiles/work-desktop.toml` — bundles personal + work + work-only components.
-3. `bash bootstrap.sh` (or `.\bootstrap.ps1`) — pick the new profile.
-
-Nothing in the public repo carries employer-specific data.
+```powershell
+.\tools\install-remote.ps1 desktop
+```

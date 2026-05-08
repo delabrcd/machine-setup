@@ -21,15 +21,25 @@ _record_failure() {
 # Cached JSON plan + helpers --------------------------------------------------
 
 driver_load_plan() {
-  local profile="$1"
-  local components="${2:-}"   # optional: comma-separated override
-  local identities="${3:-}"   # optional: comma-separated override
-  local args=(resolve "$profile")
+  # Build the plan from the current shell state. No profile arg.
+  # Note: avoid `${VAR:-{}}` — bash parameter expansion's first `}` closes the
+  # expression, leaving the second `}` as a stray character. Use explicit defaults.
+  local _idents="${IDENTITIES_OVERRIDE:-}"
+  local _extras="${EXTRA_COMPONENTS:-}"
+  local _identity_over="${IDENTITY_OVERRIDES_JSON:-}"
+  local _comp_cfg="${COMPONENT_CONFIG_JSON:-}"
+  [ -z "$_identity_over" ] && _identity_over='{}'
+  [ -z "$_comp_cfg" ]      && _comp_cfg='{}'
+
+  local args=(plan
+    --identities         "$_idents"
+    --extra-components   "$_extras"
+    --identity-overrides "$_identity_over"
+    --component-config   "$_comp_cfg"
+  )
   [ -n "${MACHINE_SETUP_OS_TAG:-}" ] && args+=(--os-tag "$MACHINE_SETUP_OS_TAG")
-  [ -n "$components" ] && args+=(--components "$components")
-  [ -n "$identities" ] && args+=(--identities "$identities")
   PLAN_JSON=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" "${args[@]}") \
-    || die "Failed to resolve profile '$profile'"
+    || die "Failed to build plan"
   export PLAN_JSON
 }
 

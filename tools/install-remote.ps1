@@ -32,7 +32,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position=0)] [string]$RemoteHost,
-    [Parameter(Mandatory, Position=1)] [string]$ProfileName,
     [Parameter(ValueFromRemainingArguments)] [string[]]$BootstrapArgs
 )
 
@@ -42,29 +41,6 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $repoUrl  = if ($env:MACHINE_SETUP_REPO) { $env:MACHINE_SETUP_REPO } else { "https://github.com/delabrcd/machine-setup.git" }
 $remoteDestLiteral = '$HOME/.local/share/machine-setup'   # expanded on the remote
-
-# -- Validate profile exists locally before we go through the remote dance ---
-$pythonCmd = Get-Command py, python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $pythonCmd) { throw "python3 not on PATH (try winget install Python.Python.3.13)" }
-
-$profileLines = & $pythonCmd "$repoRoot\lib\config.py" list-profiles
-$profileNames = @()
-foreach ($line in $profileLines) {
-    if ($line -match '\S') {
-        $profileNames += ($line | ConvertFrom-Json).name
-    }
-}
-if ($ProfileName -notin $profileNames) {
-    Write-Host "ERROR: profile '$ProfileName' not found in profiles/ or local/profiles/." -ForegroundColor Red
-    Write-Host "       Available:"
-    foreach ($line in $profileLines) {
-        if ($line -match '\S') {
-            $p = $line | ConvertFrom-Json
-            Write-Host ("         - {0}  [{1}]" -f $p.name, $p.source)
-        }
-    }
-    exit 1
-}
 
 # -- Step 1: install git on remote + clone repo ------------------------------
 Write-Host "==> [$RemoteHost] Installing git + cloning machine-setup..." -ForegroundColor Cyan
@@ -96,7 +72,7 @@ else
   echo "    Cloning REPO_URL_PLACEHOLDER -> $DEST"
   git clone REPO_URL_PLACEHOLDER "$DEST"
 fi
-mkdir -p "$DEST/local/identities" "$DEST/local/profiles" "$DEST/local/components"
+mkdir -p "$DEST/local/identities" "$DEST/local/components"
 '@
 $remoteScript = $remoteScript.Replace("REPO_URL_PLACEHOLDER", $repoUrl)
 $remoteScript | & ssh $RemoteHost "bash -s"
@@ -123,10 +99,10 @@ if (Test-Path $localDir) {
     Write-Host "    (no local/ on this machine -- skipping overlay sync)" -ForegroundColor DarkGray
 }
 
-# -- Step 3: run bootstrap.sh on remote with profile pre-set -----------------
-Write-Host "==> [$RemoteHost] Running bootstrap with profile=$ProfileName" -ForegroundColor Cyan
+# -- Step 3: run bootstrap.sh on remote ---------------------------------------
+Write-Host "==> [$RemoteHost] Running bootstrap..." -ForegroundColor Cyan
 
 $extraArgs = if ($BootstrapArgs) { ($BootstrapArgs -join ' ') } else { "" }
 # -t allocates a TTY so the BW password prompt + SSH key registration pause work.
-& ssh -t $RemoteHost "MACHINE_SETUP_PROFILE=$ProfileName bash $remoteDestLiteral/bootstrap.sh $extraArgs"
+& ssh -t $RemoteHost "bash $remoteDestLiteral/bootstrap.sh $extraArgs"
 exit $LASTEXITCODE

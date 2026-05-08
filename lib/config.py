@@ -456,6 +456,134 @@ def cmd_list_identities(args):
         print(json.dumps(ident))
 
 
+def _required_components(identity_names: list[str], os_tag: str) -> list[str]:
+    """Components implied by the user's identity selection + the OS.
+    The resolver pulls transitive deps in on top of this (e.g. nvm).
+    """
+    required: list[str] = ["packages"]
+    if os_tag == "wsl":
+        required.append("wsl-interop")
+    if not identity_names:
+        return required
+    # Anything identity-aware needs these
+    required.extend(["git-base", "git-identity", "bw-cli"])
+    for name in identity_names:
+        try:
+            ident = load_identity(name)
+        except FileNotFoundError:
+            continue
+        if ident.get("bw_ssh_item") and "ssh-key" not in required:
+            required.append("ssh-key")
+        if any(
+            (at.get("credential_helper") or "").lower() not in ("", "none")
+            for at in ident.get("applies_to", [])
+        ) and "credential-helpers" not in required:
+            required.append("credential-helpers")
+    return required
+
+
+def _convert_machine_overrides(raw: dict) -> dict:
+    """Convert machine.toml-shape identity overrides to the profile-shape
+    consumed by _apply_identity_overrides.
+
+    machine.toml:
+        [identity_overrides.personal."github.com"]
+        credential_helper = "gcm"
+
+    profile-shape (what _apply_identity_overrides expects):
+        applies_to = [{host: "github.com", credential_helper: "gcm"}]
+        plus any non-host top-level overrides
+    """
+    if not raw:
+        return {}
+    applies_to: list[dict] = []
+    top_level: dict = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            entry = {"host": k}
+            entry.update(v)
+            applies_to.append(entry)
+        else:
+            top_level[k] = v
+    out = dict(top_level)
+    if applies_to:
+        out["applies_to"] = applies_to
+    return out
+
+
+def cmd_derive_components(args):
+    os_tag = args.os_tag or detect_os_tag()
+    identity_names = [n.strip() for n in (args.identities or "").split(",") if n.strip()]
+    print(json.dumps(_required_components(identity_names, os_tag)))
+
+
+def cmd_plan(args):
+    """Build a resolution plan from per-machine inputs — no profile concept.
+
+    Args:
+        --identities CSV
+        --extra-components CSV
+        --identity-overrides JSON (machine.toml shape: {name: {host: {field: val}}})
+        --component-config JSON ({comp: {field: val}})
+        --os-tag (optional, detected if absent)
+    """
+    os_tag = args.os_tag or detect_os_tag()
+    identity_names = [n.strip() for n in (args.identities or "").split(",") if n.strip()]
+    extra_components = [c.strip() for c in (args.extra_components or "").split(",") if c.strip()]
+    identity_overrides = json.loads(args.identity_overrides or "{}")
+    component_config = json.loads(args.component_config or "{}")
+
+    required = _required_components(identity_names, os_tag)
+
+    # Explicit list = required + user-picked extras (deduped, required first)
+    seen = set()
+    explicit: list[str] = []
+    for c in required + extra_components:
+        if c not in seen:
+            explicit.append(c)
+            seen.add(c)
+
+    profile = {
+        "name": "_machine",
+        "components": explicit,
+        "identities": identity_names,
+        "component_config": component_config,
+    }
+    components = resolve_components(profile, os_tag)
+
+    identities = []
+    for n in identity_names:
+        try:
+            identities.append(load_identity(n))
+        except FileNotFoundError:
+            print(f"  WARN: identity '{n}' not found in registry or TOML — skipping", file=sys.stderr)
+
+    for ident in identities:
+        raw = identity_overrides.get(ident["name"])
+        if raw:
+            _apply_identity_overrides(ident, _convert_machine_overrides(raw))
+
+    kind = "linux" if os_tag.startswith("linux") else os_tag
+    plan = []
+    required_set = set(required)
+    for m in components:
+        script = component_script_path(m["name"], kind)
+        plan.append({
+            "name": m["name"],
+            "description": m.get("description", ""),
+            "per_identity": m["per_identity"],
+            "script": str(script) if script else None,
+            "config": component_config.get(m["name"], {}),
+            "required": m["name"] in required_set,
+        })
+
+    print(json.dumps({
+        "os_tag": os_tag,
+        "components": plan,
+        "identities": identities,
+    }, indent=2))
+
+
 def cmd_list_components(args):
     """List every component for the picker. With --profile, mark which ones
     are in that profile's explicit list (in_profile=true) and filter to those
@@ -517,6 +645,19 @@ def main():
     p_listi = sub.add_parser("list-identities", help="emit one JSON-per-line for each known identity (registry + TOML)")
     p_listi.add_argument("--profile", help="if given, mark in_profile=true for identities in this profile")
     p_listi.set_defaults(func=cmd_list_identities)
+
+    p_derive = sub.add_parser("derive-components", help="emit JSON list of required components for given identities + OS")
+    p_derive.add_argument("--identities", help="comma-separated identity names")
+    p_derive.add_argument("--os-tag")
+    p_derive.set_defaults(func=cmd_derive_components)
+
+    p_plan = sub.add_parser("plan", help="build a plan from machine inputs (no profile)")
+    p_plan.add_argument("--identities")
+    p_plan.add_argument("--extra-components")
+    p_plan.add_argument("--identity-overrides")
+    p_plan.add_argument("--component-config")
+    p_plan.add_argument("--os-tag")
+    p_plan.set_defaults(func=cmd_plan)
 
     p_ident = sub.add_parser("identity-env", help="emit KEY=value lines for an identity")
     p_ident.add_argument("identity")

@@ -1,313 +1,220 @@
 #!/usr/bin/env bash
-# First-run profile + component pickers. Persist choices to
-# ~/.config/machine-setup/machine.toml so subsequent runs are non-interactive.
+# Interactive pickers for the bootstrap. Profile-less model:
+#   1. ui_pick_identities       — which identities to install on this machine
+#   2. ui_pick_auth             — credential helper per identity-host
+#   3. ui_pick_components       — required (info) + optional (toggleable)
+#   4. ui_prompt_component_config — fill missing repo/path values for selected components
+#
+# State lives in shell vars (loaded from machine.toml at the top of bootstrap.sh,
+# saved back via _machine_state_save) so all decisions persist between runs.
 #
 # Caller must have sourced lib/common.sh and set MACHINE_SETUP_DIR.
 
 MACHINE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/machine-setup"
 MACHINE_CONFIG_FILE="$MACHINE_CONFIG_DIR/machine.toml"
 
-# ── Profile picker ──────────────────────────────────────────────────────────
+# ── machine.toml round-trip (delegated to lib/machine_config.py) ────────────
 
-# Pick a profile interactively. Sets PROFILE.
-# Order: $MACHINE_SETUP_PROFILE → saved machine.toml → TUI prompt.
-ui_pick_profile() {
-  if [ -n "${MACHINE_SETUP_PROFILE:-}" ]; then
-    PROFILE="$MACHINE_SETUP_PROFILE"
-    log "Using profile from MACHINE_SETUP_PROFILE: $PROFILE"
-    return 0
-  fi
-
-  if [ -f "$MACHINE_CONFIG_FILE" ]; then
-    local saved
-    saved=$(_machine_config_read profile)
-    if [ -n "$saved" ]; then
-      PROFILE="$saved"
-      log "Using saved profile: $PROFILE  ($MACHINE_CONFIG_FILE)"
-      return 0
-    fi
-  fi
-
-  _ui_prompt_profile || die "No profile selected"
-  _machine_config_write profile "$PROFILE"
-  log "Saved profile selection to $MACHINE_CONFIG_FILE"
+# Loads machine.toml into shell vars: IDENTITIES_OVERRIDE, EXTRA_COMPONENTS,
+# IDENTITY_OVERRIDES_JSON, COMPONENT_CONFIG_JSON, and MACHINE_LEGACY_JSON
+# (anything that didn't fit the schema — we use it for migration).
+_machine_state_load() {
+  local raw
+  raw=$(python3 "$MACHINE_SETUP_DIR/lib/machine_config.py" load "$MACHINE_CONFIG_FILE")
+  IDENTITIES_OVERRIDE=$(printf '%s' "$raw" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(','.join(d.get('identities') or []))
+")
+  EXTRA_COMPONENTS=$(printf '%s' "$raw" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(','.join(d.get('extra_components') or []))
+")
+  IDENTITY_OVERRIDES_JSON=$(printf '%s' "$raw" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps(d.get('identity_overrides') or {}))
+")
+  COMPONENT_CONFIG_JSON=$(printf '%s' "$raw" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps(d.get('component_config') or {}))
+")
+  MACHINE_LEGACY_JSON=$(printf '%s' "$raw" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps(d.get('_legacy') or {}))
+")
+  export IDENTITIES_OVERRIDE EXTRA_COMPONENTS IDENTITY_OVERRIDES_JSON COMPONENT_CONFIG_JSON MACHINE_LEGACY_JSON
 }
 
-ui_pick_profile_force() {
-  unset MACHINE_SETUP_PROFILE
+_machine_state_save() {
+  python3 -c "
+import json, os
+print(json.dumps({
+  'identities':         [n for n in os.environ.get('IDENTITIES_OVERRIDE','').split(',') if n],
+  'extra_components':   [c for c in os.environ.get('EXTRA_COMPONENTS','').split(',') if c],
+  'identity_overrides': json.loads(os.environ.get('IDENTITY_OVERRIDES_JSON','{}') or '{}'),
+  'component_config':   json.loads(os.environ.get('COMPONENT_CONFIG_JSON','{}') or '{}'),
+}))
+" | python3 "$MACHINE_SETUP_DIR/lib/machine_config.py" dump "$MACHINE_CONFIG_FILE"
+}
+
+# Hard reset of saved choices for --reconfigure.
+_machine_state_reset() {
   rm -f "$MACHINE_CONFIG_FILE"
-  ui_pick_profile
+  IDENTITIES_OVERRIDE="" EXTRA_COMPONENTS="" IDENTITY_OVERRIDES_JSON='{}' COMPONENT_CONFIG_JSON='{}' MACHINE_LEGACY_JSON='{}'
+  export IDENTITIES_OVERRIDE EXTRA_COMPONENTS IDENTITY_OVERRIDES_JSON COMPONENT_CONFIG_JSON MACHINE_LEGACY_JSON
 }
 
-_ui_prompt_profile() {
-  local profiles_json
-  profiles_json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-profiles) \
-    || die "Failed to list profiles"
+# ── Migration from the old profile-based machine.toml ──────────────────────
 
-  if [ -z "$profiles_json" ]; then
-    die "No profiles found. Add at least one to profiles/ or local/profiles/."
-  fi
-
-  local names=() labels=()
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    local n d s
-    n=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")
-    d=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('description',''))")
-    s=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['source'])")
-    names+=("$n")
-    if [ -n "$d" ]; then
-      labels+=("$n — $d  [$s]")
-    else
-      labels+=("$n  [$s]")
-    fi
-  done <<< "$profiles_json"
-
-  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
-    _ui_whiptail_radio_profile names labels
-  else
-    _ui_select_fallback_profile names labels
-  fi
-}
-
-_ui_whiptail_radio_profile() {
-  local -n _names=$1 _labels=$2
-  local args=()
-  for i in "${!_names[@]}"; do
-    args+=("${_names[$i]}" "${_labels[$i]}")
-  done
-  # `< /dev/tty` so whiptail can read keystrokes even when our own stdin is
-  # a closed curl-pipe (the curl | bash invocation pattern).
-  PROFILE=$(whiptail \
-    --title "machine-setup" \
-    --menu "Pick a profile for this machine:" \
-    20 78 10 \
-    "${args[@]}" \
-    3>&1 1>&2 2>&3 < /dev/tty) || return 1
-}
-
-_ui_select_fallback_profile() {
-  local -n _names=$1 _labels=$2
-  # When the script was piped in (curl | bash), bash's stdin is the script
-  # itself and is at EOF by the time we get here. Read from /dev/tty so the
-  # prompt works regardless of how the script was invoked. If there's no
-  # tty either (truly headless), error out instead of spinning forever on
-  # empty input.
-  [ -r /dev/tty ] || die "No /dev/tty available — cannot prompt. Set MACHINE_SETUP_PROFILE=<name> to skip the picker."
-
-  echo ""
-  echo "Pick a profile for this machine:"
-  echo ""
-  local i=1
-  for label in "${_labels[@]}"; do
-    printf "  %d) %s\n" "$i" "$label"
-    i=$((i + 1))
-  done
-  echo ""
-  while :; do
-    printf "Enter number (1-%d): " "${#_names[@]}" > /dev/tty
-    if ! read -r choice < /dev/tty; then
-      die "tty closed — cannot read profile choice"
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#_names[@]}" ]; then
-      PROFILE="${_names[$((choice - 1))]}"
-      return 0
-    fi
-    echo "Invalid choice." > /dev/tty
-  done
-}
-
-# ── Component picker ────────────────────────────────────────────────────────
-
-# Sets COMPONENTS_OVERRIDE — comma-separated list of selected component names.
-# Order: $MACHINE_SETUP_COMPONENTS → saved machine.toml `components` → TUI.
-# If --quiet was passed (QUIET_MODE=1), skips the picker and uses the profile's
-# components as-is (no override).
-ui_pick_components() {
-  if [ -n "${MACHINE_SETUP_COMPONENTS:-}" ]; then
-    COMPONENTS_OVERRIDE="$MACHINE_SETUP_COMPONENTS"
-    log "Using components from MACHINE_SETUP_COMPONENTS"
+# If MACHINE_LEGACY_JSON has a profile= key and the named profile exists,
+# pull its component_config + identity_overrides into the current state and
+# add components from it as extra_components.
+_machine_state_migrate_legacy() {
+  local profile_name
+  profile_name=$(printf '%s' "$MACHINE_LEGACY_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('profile','') or '')
+")
+  if [ -z "$profile_name" ]; then
     return 0
   fi
 
-  local saved
-  saved=$(_machine_config_read components)
-  if [ -n "$saved" ]; then
-    COMPONENTS_OVERRIDE="$saved"
-    log "Using saved component selection ($MACHINE_CONFIG_FILE)"
-    return 0
-  fi
+  log "Detected legacy machine.toml (profile=$profile_name) — migrating into new schema..."
 
-  if [ "${QUIET_MODE:-0}" = "1" ]; then
-    log "Quiet mode: using profile's component list as-is."
-    COMPONENTS_OVERRIDE=""
-    return 0
-  fi
-
-  # Picker cancellation is terminal. No silent fall-back to profile defaults
-  # here — that mode is what --quiet is for.
-  _ui_prompt_components || die "Component selection cancelled."
-  _machine_config_write components "$COMPONENTS_OVERRIDE"
-  log "Saved component selection to $MACHINE_CONFIG_FILE"
-}
-
-ui_pick_components_force() {
-  unset MACHINE_SETUP_COMPONENTS
-  _machine_config_unset components
-  ui_pick_components
-}
-
-_ui_prompt_components() {
-  local os_tag json names=() descs=() defaults=()
-  os_tag="${MACHINE_SETUP_OS_TAG:-$(python3 "$MACHINE_SETUP_DIR/lib/config.py" os-tag)}"
-  json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-components \
-           --profile "$PROFILE" --os-tag "$os_tag") \
-    || { warn "Failed to list components"; return 1; }
-
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    names+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")")
-    descs+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('description',''))")")
-    defaults+=("$(printf '%s' "$line" | python3 -c "import sys,json; print('1' if json.loads(sys.stdin.read()).get('in_profile') else '0')")")
-  done <<< "$json"
-
-  if [ "${#names[@]}" -eq 0 ]; then
-    warn "No components found for OS tag '$os_tag'"
-    return 1
-  fi
-
-  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
-    _ui_whiptail_checklist names descs defaults
-  else
-    _ui_toggle_fallback names descs defaults
-  fi
-}
-
-_ui_whiptail_checklist() {
-  local -n _names=$1 _descs=$2 _defaults=$3
-  local args=()
-  for i in "${!_names[@]}"; do
-    local on="OFF"
-    [ "${_defaults[$i]}" = "1" ] && on="ON"
-    local d="${_descs[$i]}"
-    [ "${#d}" -gt 50 ] && d="${d:0:47}..."
-    args+=("${_names[$i]}" "$d" "$on")
-  done
-  local picked
-  picked=$(whiptail \
-    --title "machine-setup -- components for profile '$PROFILE'" \
-    --checklist "Toggle components with SPACE; ENTER to confirm.\nDeps are auto-pulled in by the resolver." \
-    22 80 14 \
-    "${args[@]}" \
-    3>&1 1>&2 2>&3 < /dev/tty) || return 1
-  COMPONENTS_OVERRIDE=$(printf '%s' "$picked" | sed 's/"//g' | tr ' ' ',')
-}
-
-_ui_toggle_fallback() {
-  local -n _names=$1 _descs=$2 _defaults=$3
-  local -a sel=("${_defaults[@]}")  # copy
-
-  # Same /dev/tty rationale as _ui_select_fallback_profile.
-  [ -r /dev/tty ] || die "No /dev/tty available — cannot prompt. Set MACHINE_SETUP_COMPONENTS=<csv> or use --quiet."
-
-  while :; do
-    echo "" > /dev/tty
-    echo "Components for profile '$PROFILE' — toggle with numbers (e.g. 3 5 7), or ENTER to confirm:" > /dev/tty
-    echo "" > /dev/tty
-    local i
-    for i in "${!_names[@]}"; do
-      local mark="[ ]"
-      [ "${sel[$i]}" = "1" ] && mark="[x]"
-      printf "  %2d) %s %-25s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
-    done
-    echo "" > /dev/tty
-    printf "> " > /dev/tty
-    local input
-    if ! read -r input < /dev/tty; then
-      die "tty closed — cannot read component selection"
+  # Profiles can live in profiles/ (repo) or local/profiles/ (overlay)
+  local profile_path=""
+  for base in "$MACHINE_SETUP_DIR/local/profiles" "$MACHINE_SETUP_DIR/profiles"; do
+    if [ -f "$base/${profile_name}.toml" ]; then
+      profile_path="$base/${profile_name}.toml"
+      break
     fi
-    [ -z "$input" ] && break
-    for tok in $input; do
-      if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#_names[@]}" ]; then
-        local idx=$((tok - 1))
-        if [ "${sel[$idx]}" = "1" ]; then sel[$idx]=0; else sel[$idx]=1; fi
-      else
-        echo "  ignored: $tok" > /dev/tty
-      fi
-    done
   done
+  if [ -z "$profile_path" ]; then
+    warn "  Profile '$profile_name' not found on disk — nothing to migrate from."
+    return 0
+  fi
 
-  local out=()
-  for i in "${!_names[@]}"; do
-    [ "${sel[$i]}" = "1" ] && out+=("${_names[$i]}")
-  done
-  COMPONENTS_OVERRIDE=$(IFS=,; printf '%s' "${out[*]}")
+  # Read the profile + merge fields into current state
+  local merged
+  merged=$(python3 - "$profile_path" "$IDENTITY_OVERRIDES_JSON" "$COMPONENT_CONFIG_JSON" "$EXTRA_COMPONENTS" "$MACHINE_LEGACY_JSON" <<'PY'
+import sys, json, tomllib
+profile_path = sys.argv[1]
+ident_over_existing = json.loads(sys.argv[2] or '{}')
+comp_cfg_existing   = json.loads(sys.argv[3] or '{}')
+extra_existing      = [c for c in (sys.argv[4] or '').split(',') if c]
+legacy              = json.loads(sys.argv[5] or '{}')
+
+with open(profile_path, 'rb') as f:
+    profile = tomllib.load(f)
+
+# component_config: profile -> machine.toml (existing wins, profile fills gaps)
+for comp, cfg in (profile.get('component_config') or {}).items():
+    if comp not in comp_cfg_existing:
+        comp_cfg_existing[comp] = cfg
+    else:
+        for k, v in (cfg or {}).items():
+            comp_cfg_existing[comp].setdefault(k, v)
+
+# identity_overrides: convert from profile-shape (applies_to list, host inside)
+# to machine.toml shape (host as nested key). Existing keys win.
+for ident_name, ov in (profile.get('identity_overrides') or {}).items():
+    target = ident_over_existing.setdefault(ident_name, {})
+    for at in (ov.get('applies_to') or []):
+        host = at.get('host')
+        if not host:
+            continue
+        sub = target.setdefault(host, {})
+        for k, v in at.items():
+            if k == 'host':
+                continue
+            sub.setdefault(k, v)
+    for k, v in ov.items():
+        if k == 'applies_to':
+            continue
+        if not isinstance(v, dict):
+            target.setdefault(k, v)
+
+# extra_components: legacy components list - required (we don't know required
+# here, so just use the full list; the bootstrap's plan() will dedupe required vs extra).
+legacy_components = legacy.get('components') or profile.get('components') or []
+for c in legacy_components:
+    if c not in extra_existing:
+        extra_existing.append(c)
+
+print(json.dumps({
+    'identity_overrides': ident_over_existing,
+    'component_config':   comp_cfg_existing,
+    'extra_components':   extra_existing,
+}))
+PY
+)
+  IDENTITY_OVERRIDES_JSON=$(printf '%s' "$merged" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['identity_overrides']))")
+  COMPONENT_CONFIG_JSON=$(printf  '%s' "$merged" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['component_config']))")
+  EXTRA_COMPONENTS=$(printf       '%s' "$merged" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['extra_components']))")
+  MACHINE_LEGACY_JSON='{}'
+  export IDENTITY_OVERRIDES_JSON COMPONENT_CONFIG_JSON EXTRA_COMPONENTS MACHINE_LEGACY_JSON
+  log "  Migrated component_config + identity_overrides from profile."
 }
 
 # ── Identity picker ─────────────────────────────────────────────────────────
 
-# Sets IDENTITIES_OVERRIDE — comma-separated list of selected identity names.
-# Order: $MACHINE_SETUP_IDENTITIES → saved machine.toml → TUI prompt over the
-# discovered set (BW + TOML).
-#
-# Caller must have populated MACHINE_SETUP_IDENTITY_REGISTRY (path to BW
-# discovery JSON) before calling this — otherwise only TOML identities show up.
+_NEW_IDENT_TAG="__create_new_identity__"
+
 ui_pick_identities() {
   if [ -n "${MACHINE_SETUP_IDENTITIES:-}" ]; then
     IDENTITIES_OVERRIDE="$MACHINE_SETUP_IDENTITIES"
     log "Using identities from MACHINE_SETUP_IDENTITIES"
+    export IDENTITIES_OVERRIDE
     return 0
   fi
 
-  local saved
-  saved=$(_machine_config_read identities)
-  if [ -n "$saved" ]; then
-    IDENTITIES_OVERRIDE="$saved"
-    log "Using saved identity selection ($MACHINE_CONFIG_FILE)"
+  if [ -n "${IDENTITIES_OVERRIDE:-}" ] && [ "${RECONFIGURE:-0}" != "1" ]; then
+    log "Using saved identities: $IDENTITIES_OVERRIDE"
     return 0
   fi
 
   if [ "${QUIET_MODE:-0}" = "1" ]; then
-    log "Quiet mode: using profile's identity list as-is."
-    IDENTITIES_OVERRIDE=""
+    log "Quiet mode: using saved identities (may be empty)."
     return 0
   fi
 
   _ui_prompt_identities || die "Identity selection cancelled."
-  _machine_config_write identities "$IDENTITIES_OVERRIDE"
-  log "Saved identity selection to $MACHINE_CONFIG_FILE"
+  export IDENTITIES_OVERRIDE
 }
-
-ui_pick_identities_force() {
-  unset MACHINE_SETUP_IDENTITIES
-  _machine_config_unset identities
-  ui_pick_identities
-}
-
-# Sentinel "name" used for the synthetic [+] picker entry. Anything containing
-# spaces won't collide with real identity names (validation rejects spaces).
-_NEW_IDENT_TAG="__create_new_identity__"
 
 _ui_prompt_identities() {
   while :; do
     local json names=() emails=() defaults=()
-    json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-identities --profile "$PROFILE") \
+    json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-identities) \
       || die "Failed to list identities"
 
-    # Synthetic top entry: lets the user create a new identity inline. The
-    # picker re-shows after creation so the new identity becomes selectable.
     names+=("$_NEW_IDENT_TAG")
     emails+=("[+] Create a new identity in Bitwarden...")
     defaults+=("0")
 
+    # Pre-check identities that are in the saved list
+    local saved_set=",${IDENTITIES_OVERRIDE:-},"
+
     while IFS= read -r line; do
       [ -z "$line" ] && continue
-      names+=("$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")")
-      emails+=("$(printf '%s' "$line" | python3 -c "
+      local n d
+      n=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")
+      d=$(printf '%s' "$line" | python3 -c "
 import sys,json; d=json.loads(sys.stdin.read())
-src=d.get('source',''); n=d.get('git_name',''); e=d.get('git_email','')
-print(f'{n} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")")
-      defaults+=("$(printf '%s' "$line" | python3 -c "import sys,json; print('1' if json.loads(sys.stdin.read()).get('in_profile') else '0')")")
+src=d.get('source',''); g=d.get('git_name',''); e=d.get('git_email','')
+print(f'{g} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")
+      names+=("$n")
+      emails+=("$d")
+      if [[ "$saved_set" == *",$n,"* ]]; then
+        defaults+=("1")
+      else
+        defaults+=("0")
+      fi
     done <<< "$json"
 
     if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
@@ -316,7 +223,6 @@ print(f'{n} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")")
       _ui_toggle_fallback_identities names emails defaults
     fi
 
-    # If the synthetic entry was selected, run the wizard then re-loop.
     case ",$IDENTITIES_OVERRIDE," in
       *",$_NEW_IDENT_TAG,"*)
         IDENTITIES_OVERRIDE=$(printf '%s' "$IDENTITIES_OVERRIDE" \
@@ -327,34 +233,6 @@ print(f'{n} <{e}>  [{src}]' if e else f'(no email)  [{src}]')")")
     esac
     break
   done
-}
-
-# Inline identity-creation wizard. Calls tools/seed-bw-identity.sh new <name>
-# (which prompts for git_name/email/host/helper, generates ed25519, stores in
-# BW, prints the public key for registration), then refreshes the runtime
-# registry so the picker re-shows with the new identity present.
-_ui_create_identity_wizard() {
-  [ -r /dev/tty ] || { warn "no /dev/tty for wizard"; return 1; }
-
-  local ident_name=""
-  while :; do
-    printf '\nNew identity name (alphanumeric/-/_, e.g. personal): ' > /dev/tty
-    if ! read -r ident_name < /dev/tty; then
-      return 1
-    fi
-    if [[ "$ident_name" =~ ^[A-Za-z0-9_-]+$ ]]; then
-      break
-    fi
-    echo "  invalid — use only letters, digits, hyphens, underscores" > /dev/tty
-  done
-
-  bash "$MACHINE_SETUP_DIR/tools/seed-bw-identity.sh" new "$ident_name" \
-    || { warn "Identity creation failed"; return 1; }
-
-  # Refresh the registry so the next picker iteration sees the new item.
-  if [ -n "${MACHINE_SETUP_IDENTITY_REGISTRY:-}" ]; then
-    bw_discover_identities "$MACHINE_SETUP_IDENTITY_REGISTRY" || true
-  fi
 }
 
 _ui_whiptail_identities() {
@@ -369,8 +247,8 @@ _ui_whiptail_identities() {
   done
   local picked
   picked=$(whiptail \
-    --title "machine-setup -- identities for profile '$PROFILE'" \
-    --checklist "Select which identities to install on this machine. Default = identities listed in the profile." \
+    --title "machine-setup -- identities" \
+    --checklist "Pick which identities to install on this machine." \
     20 80 12 \
     "${args[@]}" \
     3>&1 1>&2 2>&3 < /dev/tty) || return 1
@@ -380,24 +258,26 @@ _ui_whiptail_identities() {
 _ui_toggle_fallback_identities() {
   local -n _names=$1 _descs=$2 _defaults=$3
   local -a sel=("${_defaults[@]}")
-  [ -r /dev/tty ] || die "No /dev/tty available — set MACHINE_SETUP_IDENTITIES=<csv> or use --quiet"
+  [ -r /dev/tty ] || die "No /dev/tty -- set MACHINE_SETUP_IDENTITIES=<csv> or use --quiet"
 
   while :; do
     echo "" > /dev/tty
-    echo "Identities for profile '$PROFILE' — toggle by number, ENTER to confirm:" > /dev/tty
+    echo "Identities -- toggle by number, ENTER to confirm:" > /dev/tty
     echo "" > /dev/tty
     local i
     for i in "${!_names[@]}"; do
       local mark="[ ]"
       [ "${sel[$i]}" = "1" ] && mark="[x]"
-      printf "  %2d) %s %-15s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
+      if [ "${_names[$i]}" = "$_NEW_IDENT_TAG" ]; then
+        printf "  %2d) %s %s\n" "$((i+1))" "$mark" "${_descs[$i]}" > /dev/tty
+      else
+        printf "  %2d) %s %-15s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
+      fi
     done
     echo "" > /dev/tty
     printf "> " > /dev/tty
     local input
-    if ! read -r input < /dev/tty; then
-      die "tty closed — cannot read identity selection"
-    fi
+    if ! read -r input < /dev/tty; then die "tty closed -- cannot read identity selection"; fi
     [ -z "$input" ] && break
     for tok in $input; do
       if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#_names[@]}" ]; then
@@ -416,82 +296,337 @@ _ui_toggle_fallback_identities() {
   IDENTITIES_OVERRIDE=$(IFS=,; printf '%s' "${out[*]}")
 }
 
-# ── machine.toml read/write ─────────────────────────────────────────────────
+_ui_create_identity_wizard() {
+  [ -r /dev/tty ] || { warn "no /dev/tty for wizard"; return 1; }
+  local ident_name=""
+  while :; do
+    printf '\nNew identity name (alphanumeric/-/_): ' > /dev/tty
+    if ! read -r ident_name < /dev/tty; then return 1; fi
+    if [[ "$ident_name" =~ ^[A-Za-z0-9_-]+$ ]]; then break; fi
+    echo "  invalid -- letters/digits/-/_ only" > /dev/tty
+  done
 
-_machine_config_read() {
-  local key="$1"
-  [ -f "$MACHINE_CONFIG_FILE" ] || return 0
-  python3 - "$MACHINE_CONFIG_FILE" "$key" <<'PY'
-import sys, tomllib
-path, key = sys.argv[1], sys.argv[2]
-try:
-    with open(path, 'rb') as f:
-        data = tomllib.load(f)
-    val = data.get(key)
-    if isinstance(val, list):
-        print(",".join(val))
-    elif val is not None:
-        print(val)
-except Exception:
-    pass
-PY
+  bash "$MACHINE_SETUP_DIR/tools/seed-bw-identity.sh" new "$ident_name" \
+    || { warn "Identity creation failed"; return 1; }
+
+  if [ -n "${MACHINE_SETUP_IDENTITY_REGISTRY:-}" ]; then
+    bw_discover_identities "$MACHINE_SETUP_IDENTITY_REGISTRY" || true
+  fi
 }
 
-# Write a single key. Handles string and comma-separated-list values:
-#   _machine_config_write profile work-desktop
-#   _machine_config_write components "packages,nvm,claude-code"
-_machine_config_write() {
-  local key="$1" value="$2"
-  mkdir -p "$MACHINE_CONFIG_DIR"
-  python3 - "$MACHINE_CONFIG_FILE" "$key" "$value" <<'PY'
-import sys, tomllib, pathlib
-path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
-p = pathlib.Path(path)
-data = {}
-if p.exists():
-    try:
-        data = tomllib.loads(p.read_text())
-    except Exception:
-        data = {}
+# ── Per-identity auth picker ────────────────────────────────────────────────
+#
+# For each chosen identity, walk its applies_to entries and let the user
+# confirm or override the credential_helper per host. Updates
+# IDENTITY_OVERRIDES_JSON (machine.toml shape: {ident: {host: {field: val}}}).
 
-if "," in value:
-    data[key] = [v.strip() for v in value.split(",") if v.strip()]
-else:
-    data[key] = value
+ui_pick_auth() {
+  if [ "${QUIET_MODE:-0}" = "1" ]; then
+    log "Quiet mode: keeping existing auth settings."
+    return 0
+  fi
+  if [ -z "${IDENTITIES_OVERRIDE:-}" ]; then
+    return 0
+  fi
+  if [ ! -r /dev/tty ]; then
+    log "No /dev/tty -- skipping auth picker, keeping existing overrides."
+    return 0
+  fi
 
-# Hand-write TOML (no stdlib writer in 3.11). We only emit string/list[string].
-out = ["# Auto-generated by machine-setup. Edit to switch settings, or delete this",
-       "# file to be re-prompted on next bootstrap run.", ""]
-for k, v in data.items():
-    if isinstance(v, list):
-        items = ", ".join('"{}"'.format(x.replace('"', '\\"')) for x in v)
-        out.append(f'{k} = [{items}]')
-    else:
-        out.append(f'{k} = "{v}"')
-p.write_text("\n".join(out) + "\n")
+  echo "" > /dev/tty
+  echo "--- Per-identity auth ---" > /dev/tty
+  echo "(ENTER to keep current/default; or pick a number to override)" > /dev/tty
+
+  local new_overrides_json
+  new_overrides_json=$(python3 - "$IDENTITY_OVERRIDES_JSON" "$IDENTITIES_OVERRIDE" "${MACHINE_SETUP_IDENTITY_REGISTRY:-}" <<'PY'
+import sys, json, os
+existing  = json.loads(sys.argv[1] or '{}')
+selected  = [n for n in (sys.argv[2] or '').split(',') if n]
+registry_path = sys.argv[3]
+registry = {}
+if registry_path and os.path.exists(registry_path):
+    with open(registry_path) as f:
+        registry = json.load(f)
+out = []
+for name in selected:
+    ident = registry.get(name, {})
+    for at in (ident.get('applies_to') or []):
+        host = at.get('host')
+        if not host:
+            continue
+        current = existing.get(name, {}).get(host, {}).get('credential_helper') \
+                  or at.get('credential_helper') or 'ssh'
+        out.append({'identity': name, 'host': host, 'current': current})
+print(json.dumps(out))
 PY
+)
+
+  # Iterate each identity-host pair and prompt
+  local current_json
+  current_json=$(printf '%s' "$new_overrides_json")
+  local result_json="$IDENTITY_OVERRIDES_JSON"
+
+  while IFS=$'\t' read -r ident host current; do
+    [ -z "$ident" ] && continue
+    echo "" > /dev/tty
+    echo "Identity '$ident' on $host -- credential helper [current: $current]" > /dev/tty
+    echo "  1) ssh        — SSH-only auth (recommended for personal hosts)" > /dev/tty
+    echo "  2) gcm        — Git Credential Manager (HTTPS via OAuth, needed for SSO)" > /dev/tty
+    echo "  3) bitwarden  — username/api-token from a BW item" > /dev/tty
+    echo "  4) none       — no helper (clears any existing one)" > /dev/tty
+    printf "Pick [1-4] or ENTER to keep '%s': " "$current" > /dev/tty
+    local choice
+    if ! read -r choice < /dev/tty; then die "tty closed -- cannot read auth selection"; fi
+
+    local new_helper="$current"
+    case "$choice" in
+      "")    new_helper="$current" ;;
+      1) new_helper="ssh" ;;
+      2) new_helper="gcm" ;;
+      3) new_helper="bitwarden" ;;
+      4) new_helper="none" ;;
+      *) echo "  invalid; keeping $current" > /dev/tty ;;
+    esac
+
+    # Update result_json with this identity-host override
+    result_json=$(python3 - "$result_json" "$ident" "$host" "$new_helper" <<'PY'
+import sys, json
+data = json.loads(sys.argv[1] or '{}')
+ident, host, helper = sys.argv[2], sys.argv[3], sys.argv[4]
+data.setdefault(ident, {}).setdefault(host, {})['credential_helper'] = helper
+print(json.dumps(data))
+PY
+)
+  done < <(printf '%s' "$current_json" | python3 -c "
+import sys, json
+for r in json.load(sys.stdin):
+    print(f\"{r['identity']}\t{r['host']}\t{r['current']}\")
+")
+
+  IDENTITY_OVERRIDES_JSON="$result_json"
+  export IDENTITY_OVERRIDES_JSON
 }
 
-_machine_config_unset() {
-  local key="$1"
-  [ -f "$MACHINE_CONFIG_FILE" ] || return 0
-  python3 - "$MACHINE_CONFIG_FILE" "$key" <<'PY'
-import sys, tomllib, pathlib
-path, key = sys.argv[1], sys.argv[2]
-p = pathlib.Path(path)
-try:
-    data = tomllib.loads(p.read_text())
-except Exception:
-    sys.exit(0)
-data.pop(key, None)
-out = ["# Auto-generated by machine-setup. Edit to switch settings, or delete this",
-       "# file to be re-prompted on next bootstrap run.", ""]
-for k, v in data.items():
-    if isinstance(v, list):
-        items = ", ".join('"{}"'.format(x.replace('"', '\\"')) for x in v)
-        out.append(f'{k} = [{items}]')
-    else:
-        out.append(f'{k} = "{v}"')
-p.write_text("\n".join(out) + "\n")
-PY
+# ── Component picker (required vs optional) ─────────────────────────────────
+
+ui_pick_components() {
+  if [ -n "${MACHINE_SETUP_COMPONENTS:-}" ]; then
+    EXTRA_COMPONENTS="$MACHINE_SETUP_COMPONENTS"
+    log "Using extra components from MACHINE_SETUP_COMPONENTS"
+    export EXTRA_COMPONENTS
+    return 0
+  fi
+
+  if [ -n "${EXTRA_COMPONENTS:-}" ] && [ "${RECONFIGURE:-0}" != "1" ]; then
+    log "Using saved extra components: $EXTRA_COMPONENTS"
+    return 0
+  fi
+
+  if [ "${QUIET_MODE:-0}" = "1" ]; then
+    log "Quiet mode: using saved extra components (may be empty)."
+    return 0
+  fi
+
+  _ui_prompt_components || die "Component selection cancelled."
+  export EXTRA_COMPONENTS
+}
+
+_ui_prompt_components() {
+  local os_tag="${MACHINE_SETUP_OS_TAG:-$(python3 "$MACHINE_SETUP_DIR/lib/config.py" os-tag)}"
+
+  # Required (derived from identities + OS)
+  local required_json
+  required_json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" derive-components \
+    --identities "$IDENTITIES_OVERRIDE" --os-tag "$os_tag")
+
+  # Show required as a header, not a checklist
+  echo "" > /dev/tty
+  echo "--- Required components ---" > /dev/tty
+  printf '%s' "$required_json" | python3 -c "
+import sys, json
+for c in json.load(sys.stdin):
+    print(f'  [R] {c}')" > /dev/tty
+
+  # Optional = all components supported on this OS minus the required set
+  local json all_names=() descs=() defaults=()
+  json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" list-components --os-tag "$os_tag")
+  local saved_set=",${EXTRA_COMPONENTS:-},"
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local n d
+    n=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['name'])")
+    # Skip components that are already in required
+    if printf '%s' "$required_json" | python3 -c "
+import sys, json
+print('1' if '$n' in json.load(sys.stdin) else '0')
+" | grep -q '^1$'; then
+      continue
+    fi
+    d=$(printf '%s' "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('description',''))")
+    all_names+=("$n")
+    descs+=("$d")
+    if [[ "$saved_set" == *",$n,"* ]]; then
+      defaults+=("1")
+    else
+      defaults+=("0")
+    fi
+  done <<< "$json"
+
+  if [ "${#all_names[@]}" -eq 0 ]; then
+    log "No optional components for $os_tag — proceeding with required only."
+    EXTRA_COMPONENTS=""
+    return 0
+  fi
+
+  echo "" > /dev/tty
+  echo "--- Optional components ---" > /dev/tty
+  if command -v whiptail >/dev/null 2>&1 && [ -r /dev/tty ]; then
+    _ui_whiptail_optional all_names descs defaults
+  else
+    _ui_toggle_fallback_optional all_names descs defaults
+  fi
+}
+
+_ui_whiptail_optional() {
+  local -n _names=$1 _descs=$2 _defaults=$3
+  local args=()
+  for i in "${!_names[@]}"; do
+    local on="OFF"
+    [ "${_defaults[$i]}" = "1" ] && on="ON"
+    local d="${_descs[$i]}"
+    [ "${#d}" -gt 50 ] && d="${d:0:47}..."
+    args+=("${_names[$i]}" "$d" "$on")
+  done
+  local picked
+  picked=$(whiptail \
+    --title "machine-setup -- optional components" \
+    --checklist "Toggle optional components. Required ones are auto-included." \
+    22 80 14 \
+    "${args[@]}" \
+    3>&1 1>&2 2>&3 < /dev/tty) || return 1
+  EXTRA_COMPONENTS=$(printf '%s' "$picked" | sed 's/"//g' | tr ' ' ',')
+}
+
+_ui_toggle_fallback_optional() {
+  local -n _names=$1 _descs=$2 _defaults=$3
+  local -a sel=("${_defaults[@]}")
+  [ -r /dev/tty ] || die "No /dev/tty -- set MACHINE_SETUP_COMPONENTS=<csv> or use --quiet"
+
+  while :; do
+    echo "" > /dev/tty
+    echo "Toggle by number, ENTER to confirm:" > /dev/tty
+    echo "" > /dev/tty
+    local i
+    for i in "${!_names[@]}"; do
+      local mark="[ ]"
+      [ "${sel[$i]}" = "1" ] && mark="[x]"
+      printf "  %2d) %s %-22s %s\n" "$((i+1))" "$mark" "${_names[$i]}" "${_descs[$i]}" > /dev/tty
+    done
+    echo "" > /dev/tty
+    printf "> " > /dev/tty
+    local input
+    if ! read -r input < /dev/tty; then die "tty closed"; fi
+    [ -z "$input" ] && break
+    for tok in $input; do
+      if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#_names[@]}" ]; then
+        local idx=$((tok - 1))
+        if [ "${sel[$idx]}" = "1" ]; then sel[$idx]=0; else sel[$idx]=1; fi
+      fi
+    done
+  done
+
+  local out=()
+  for i in "${!_names[@]}"; do
+    [ "${sel[$i]}" = "1" ] && out+=("${_names[$i]}")
+  done
+  EXTRA_COMPONENTS=$(IFS=,; printf '%s' "${out[*]}")
+}
+
+# ── Component-config prompts ────────────────────────────────────────────────
+#
+# After components are picked, walk a handful of components that need config
+# (chezmoi, dev-utilities, bitbucket-mcp, wsl-bootstrap) and prompt for any
+# unset values. Existing component_config entries win — we only fill blanks.
+
+ui_prompt_component_config() {
+  if [ "${QUIET_MODE:-0}" = "1" ]; then
+    return 0
+  fi
+  if [ ! -r /dev/tty ]; then
+    return 0
+  fi
+
+  # All selected: required + extra. Easier to just prompt for any of the
+  # known-needs-config components if they appear anywhere in the plan.
+  local os_tag="${MACHINE_SETUP_OS_TAG:-$(python3 "$MACHINE_SETUP_DIR/lib/config.py" os-tag)}"
+  local plan_components_json
+  plan_components_json=$(python3 "$MACHINE_SETUP_DIR/lib/config.py" plan \
+    --identities "$IDENTITIES_OVERRIDE" \
+    --extra-components "$EXTRA_COMPONENTS" \
+    --identity-overrides "$IDENTITY_OVERRIDES_JSON" \
+    --component-config "$COMPONENT_CONFIG_JSON" \
+    --os-tag "$os_tag" 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(','.join(c['name'] for c in d['components']))
+")
+
+  _has() { case ",$plan_components_json," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+  # Helper: prompt if config field is missing/empty
+  _prompt_component_field() {
+    local comp="$1" field="$2" question="$3"
+    local current
+    current=$(printf '%s' "$COMPONENT_CONFIG_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print((d.get('$comp') or {}).get('$field') or '')
+")
+    if [ -n "$current" ]; then
+      return 0  # already set
+    fi
+    printf '%s\n' "$question" > /dev/tty
+    printf '> ' > /dev/tty
+    local val
+    if ! read -r val < /dev/tty; then return 0; fi
+    if [ -z "$val" ]; then return 0; fi
+    COMPONENT_CONFIG_JSON=$(printf '%s' "$COMPONENT_CONFIG_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+d.setdefault('$comp', {})['$field'] = '''$val'''
+print(json.dumps(d))
+")
+  }
+
+  echo "" > /dev/tty
+  echo "--- Component configuration ---" > /dev/tty
+  echo "(ENTER to skip / leave unset)" > /dev/tty
+
+  if _has chezmoi; then
+    echo "" > /dev/tty
+    echo "[chezmoi] dotfiles repo URL (e.g. https://github.com/<you>/dotfiles.git):" > /dev/tty
+    _prompt_component_field chezmoi repo "(repo URL)"
+  fi
+
+  if _has dev-utilities; then
+    echo "" > /dev/tty
+    echo "[dev-utilities] git URL of repo to clone:" > /dev/tty
+    _prompt_component_field dev-utilities repo "(git URL)"
+  fi
+
+  if _has bitbucket-mcp; then
+    echo "" > /dev/tty
+    echo "[bitbucket-mcp] path to MCP source dir (default: ~/.local/share/dev-utilities/bitbucket-mcp):" > /dev/tty
+    _prompt_component_field bitbucket-mcp path "(path)"
+  fi
+
+  if _has wsl-bootstrap; then
+    echo "" > /dev/tty
+    echo "[wsl-bootstrap] WSL distro name (default: Ubuntu):" > /dev/tty
+    _prompt_component_field wsl-bootstrap distro "(distro)"
+  fi
+
+  export COMPONENT_CONFIG_JSON
 }
