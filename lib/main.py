@@ -126,16 +126,24 @@ def migrate_legacy(state: dict) -> dict:
 # ── Pickers (subprocess to lib/tui.py) ──────────────────────────────────────
 
 def _run_tui(*subcmd_args: str) -> str:
-    """Run lib/tui.py with the given args, return stdout (stripped)."""
-    cmd = [sys.executable, str(LIB_DIR / "tui.py"), *subcmd_args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode == 130:
-        die("Aborted by user.", 130)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        die(f"TUI step failed (exit {proc.returncode})", proc.returncode)
-    sys.stderr.write(proc.stderr)  # forward any logs
-    return proc.stdout.rstrip("\n")
+    """Run lib/tui.py with the given args. The result is written to a temp
+    file (--output) so the subprocess can keep stdout/stderr connected to
+    the user's terminal — questionary needs that to render its TUI.
+    Returns the file contents (stripped).
+    """
+    out_path = Path(tempfile.mktemp(suffix=".tui-out"))
+    cmd = [sys.executable, str(LIB_DIR / "tui.py"), *subcmd_args, "--output", str(out_path)]
+    try:
+        proc = subprocess.run(cmd)  # no capture_output — user sees the UI
+        if proc.returncode == 130:
+            die("Aborted by user.", 130)
+        if proc.returncode != 0:
+            die(f"TUI step failed (exit {proc.returncode})", proc.returncode)
+        if not out_path.exists():
+            return ""
+        return out_path.read_text().rstrip("\n")
+    finally:
+        out_path.unlink(missing_ok=True)
 
 
 _NEW_IDENT_TAG = "__create_new_identity__"

@@ -33,6 +33,18 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _emit(args, value: str) -> None:
+    """Write the picker result to args.output if set, else to stdout.
+    Using a file lets the caller leave subprocess stdout connected to the
+    user's terminal so questionary can render its UI there.
+    """
+    out = getattr(args, "output", None)
+    if out:
+        Path(out).write_text(value)
+    else:
+        print(value)
+
+
 def _ensure_tty_stdin() -> None:
     """Redirect stdin from /dev/tty when our own stdin isn't a terminal —
     happens when bash launched us through `curl | bash` etc. questionary
@@ -176,7 +188,7 @@ def cmd_pick_identities(args):
     else:
         result = _fallback_checkbox("Identities:", items)
 
-    print(",".join(result))
+    _emit(args, ",".join(result))
 
 
 def cmd_pick_auth(args):
@@ -213,7 +225,7 @@ def cmd_pick_auth(args):
             choice = _fallback_select(title, helpers, default=default)
         out.setdefault(ident, {}).setdefault(host, {})["credential_helper"] = choice
 
-    print(json.dumps(out))
+    _emit(args, json.dumps(out))
 
 
 def cmd_pick_components(args):
@@ -231,7 +243,7 @@ def cmd_pick_components(args):
     # Filter out required from choices (don't show as togglable)
     optional = [c for c in available if c["name"] not in set(required)]
     if not optional:
-        print("")
+        _emit(args, "")
         return
 
     items = []
@@ -254,7 +266,7 @@ def cmd_pick_components(args):
     else:
         result = _fallback_checkbox("Optional components:", items)
 
-    print(",".join(result))
+    _emit(args, ",".join(result))
 
 
 def cmd_prompt_component_config(args):
@@ -307,7 +319,7 @@ def cmd_prompt_component_config(args):
             elif default:
                 comp_cfg[field] = default
 
-    print(json.dumps(current))
+    _emit(args, json.dumps(current))
 
 
 def cmd_wizard_create_identity(args):
@@ -374,36 +386,40 @@ def cmd_wizard_create_identity(args):
         "host": host,
         "credential_helper": helper,
     }
-    print(json.dumps(out))
+    _emit(args, json.dumps(out))
 
 
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p1 = sub.add_parser("pick-identities")
-    p1.add_argument("--available", required=True, help="JSON list of available identities")
-    p1.add_argument("--selected",  default="",     help="CSV of pre-selected names")
-    p1.set_defaults(func=cmd_pick_identities)
-
-    p2 = sub.add_parser("pick-auth")
-    p2.add_argument("--pairs",   required=True, help="JSON list of {identity,host,current_helper}")
-    p2.add_argument("--current", default="{}",  help="JSON of existing overrides")
-    p2.set_defaults(func=cmd_pick_auth)
-
-    p3 = sub.add_parser("pick-components")
-    p3.add_argument("--required",  default="",     help="CSV of required component names (info only)")
-    p3.add_argument("--available", required=True, help="JSON list of all available components for this OS")
-    p3.add_argument("--selected",  default="",     help="CSV of pre-selected optional names")
-    p3.set_defaults(func=cmd_pick_components)
-
-    p4 = sub.add_parser("prompt-component-config")
-    p4.add_argument("--components", default="",   help="CSV of components in the resolved plan")
-    p4.add_argument("--current",    default="{}", help="JSON of existing component_config")
-    p4.set_defaults(func=cmd_prompt_component_config)
-
-    p5 = sub.add_parser("wizard-create-identity")
-    p5.set_defaults(func=cmd_wizard_create_identity)
+    # `--output <path>` writes the result there instead of stdout. The
+    # bootstrap orchestrator uses this so it can leave stdout/stderr free for
+    # questionary to render to the user's terminal — capturing them through a
+    # subprocess pipe would hide the UI entirely.
+    for sp_name, fn in [
+        ("pick-identities",         cmd_pick_identities),
+        ("pick-auth",               cmd_pick_auth),
+        ("pick-components",         cmd_pick_components),
+        ("prompt-component-config", cmd_prompt_component_config),
+        ("wizard-create-identity",  cmd_wizard_create_identity),
+    ]:
+        sp = sub.add_parser(sp_name)
+        sp.add_argument("--output", help="write result here instead of stdout")
+        if sp_name == "pick-identities":
+            sp.add_argument("--available", required=True)
+            sp.add_argument("--selected",  default="")
+        elif sp_name == "pick-auth":
+            sp.add_argument("--pairs",   required=True)
+            sp.add_argument("--current", default="{}")
+        elif sp_name == "pick-components":
+            sp.add_argument("--required",  default="")
+            sp.add_argument("--available", required=True)
+            sp.add_argument("--selected",  default="")
+        elif sp_name == "prompt-component-config":
+            sp.add_argument("--components", default="")
+            sp.add_argument("--current",    default="{}")
+        sp.set_defaults(func=fn)
 
     args = p.parse_args()
     args.func(args)
