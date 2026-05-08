@@ -100,9 +100,9 @@ if ($msJira -eq "1") {
         & { $ErrorActionPreference = "Continue"
             claude mcp add --scope user `
                 jira `
-                -e "JIRA_SERVER_URL=$jiraUrl" `
+                -e "JIRA_URL=$jiraUrl" `
                 -e "JIRA_PERSONAL_TOKEN=$jiraPat" `
-                -e "WSLENV=JIRA_SERVER_URL/u:JIRA_PERSONAL_TOKEN/u" `
+                -e "WSLENV=JIRA_URL/u:JIRA_PERSONAL_TOKEN/u" `
                 -- wsl.exe -d Ubuntu -- bash -lc 'uvx mcp-atlassian' 2>&1 | Out-Null
         }
         Write-Host "  registered jira (via WSL)"
