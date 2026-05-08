@@ -10,7 +10,7 @@ Entrypoints (invoked from bootstrap.sh / bootstrap.ps1):
     python3 lib/main.py [--reconfigure] [--quiet]
 """
 from __future__ import annotations
-import argparse, json, os, signal, subprocess, sys, tempfile
+import argparse, json, os, shutil, signal, subprocess, sys, tempfile
 from pathlib import Path
 
 LIB_DIR = Path(__file__).resolve().parent
@@ -362,6 +362,20 @@ def main() -> int:
     if proc.returncode != 0:
         warn("Failed to persist machine.toml")
     log(f"Saved selections to {config_file}")
+
+    # Pre-cache sudo so component scripts (apt/dnf/pacman, etc.) don't prompt
+    # mid-plan. One prompt up front rather than scattered ones during long
+    # installs. Skipped on Windows (no sudo) and when already root.
+    if (
+        shutil.which("sudo")
+        and hasattr(os, "geteuid")
+        and os.geteuid() != 0
+    ):
+        step("Sudo")
+        log("Caching sudo credentials (one prompt for the whole bootstrap)...")
+        rc = subprocess.call(["sudo", "-v"])
+        if rc != 0:
+            warn("sudo -v failed — components needing sudo may re-prompt during install")
 
     step("Resolve plan")
     plan = driver.build_plan(

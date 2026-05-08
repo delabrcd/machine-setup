@@ -1,7 +1,12 @@
 name = "chezmoi"
-description = "chezmoi-managed dotfiles (e.g. Claude Code config)"
+description = "chezmoi-managed dotfiles (Claude Code config, MCP server registration, etc.)"
 supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
-depends_on = ["claude-code"]
+# chezmoi clones a (typically GitHub-hosted) dotfiles repo, so SSH key + git
+# identity must already be set up. Some chezmoi-managed scripts register MCP
+# servers via `uvx`, hence the uv dep. claude-code is technically optional —
+# the dotfiles only configure it if it's installed — but listing it here keeps
+# the install order sensible (claude-code -> chezmoi).
+depends_on = ["claude-code", "uv", "ssh-key", "credential-helpers", "git-identity"]
 per_identity = false
 
 # The driver makes profile-level [component_config.chezmoi] available to the
