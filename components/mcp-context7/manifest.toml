@@ -1,0 +1,13 @@
+name = "mcp-context7"
+description = "Register the context7 MCP (live library/framework docs) with Claude Code"
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
+# Needs claude (for `claude mcp add`), bw (for the API key), and node/npm so
+# the registered command (`npx @upstash/context7-mcp`) actually resolves.
+depends_on = ["claude-code", "bw-cli", "nvm"]
+# Run after chezmoi so the base ~/.claude.json exists before we register.
+runs_after = ["chezmoi"]
+per_identity = false
+
+# BW item / field used to look up the API key. Can be overridden in
+# machine.toml's [component_config.mcp-context7].
+# Defaults match the existing "Claude Code MCP Secrets" item.
