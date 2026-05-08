@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 # Anthropic publishes a native PowerShell installer at install.claude.ai/install.ps1
 # (mirrors the Linux/macOS install.sh). It writes claude.exe to a per-user

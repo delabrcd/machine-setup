@@ -1,12 +1,15 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 # Install bw-unlock function into the user's PowerShell profile(s). Loads
 # every BW SSH item declared by the active profile's identities.
 
-# Pull BW item names from the resolved plan
+# Pull BW item names from the resolved plan (passed in via $env:PLAN_JSON)
 $items = @()
-foreach ($ident in $script:Plan.identities) {
-    if ($ident.bw_ssh_item) { $items += $ident.bw_ssh_item }
+if ($env:PLAN_JSON) {
+    $plan = $env:PLAN_JSON | ConvertFrom-Json
+    foreach ($ident in $plan.identities) {
+        if ($ident.bw_ssh_item) { $items += $ident.bw_ssh_item }
+    }
 }
 if ($items.Count -eq 0) {
     Write-Log "bw-unlock-shell: no BW SSH items in plan -- installing a no-op stub"

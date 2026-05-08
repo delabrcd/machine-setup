@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 # Base packages for Windows host. Note: uv (uvx) deliberately NOT installed here
 # -- corporate AV often scans/blocks the binary. Use the WSL side for uvx-based

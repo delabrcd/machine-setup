@@ -10,3 +10,7 @@
 
 # Claude Code per-project local settings
 .claude/settings.local.json
+
+# Python bytecode cache
+__pycache__/
+*.pyc

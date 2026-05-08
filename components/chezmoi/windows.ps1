@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 Install-Winget -Id "twpayne.chezmoi" -Label "chezmoi"
 Sync-PathFromRegistry

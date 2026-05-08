@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 git config --global init.defaultBranch main
 git config --global pull.rebase false

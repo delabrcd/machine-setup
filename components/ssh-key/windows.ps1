@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 if (-not $env:IDENT_BW_SSH_ITEM) {
     Write-Log "ssh-key ($($env:IDENT_NAME)): no bw_ssh_item -- skipping"

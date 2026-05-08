@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 # Per-identity HTTPS credential helpers on Windows. Same scheme set as Linux:
 #   gcm        - Git Credential Manager (bundled with Git for Windows)

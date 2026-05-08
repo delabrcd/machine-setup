@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 if (-not $env:IDENT_NAME)      { Write-Warn "git-identity: IDENT_NAME not set"; return }
 if (-not $env:IDENT_GIT_NAME)  { Write-Warn "git-identity ($($env:IDENT_NAME)): no git_name"; return }

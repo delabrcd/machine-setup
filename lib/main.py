@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""Bootstrap orchestrator. Single Python entrypoint replacing what used to
+be split across bootstrap.sh, lib/ui.sh, lib/driver.sh, lib/bw-session.sh.
+
+Components themselves still ship as shell scripts (linux.sh / windows.ps1)
+because they're inherently OS-specific package-manager calls; we run them
+via subprocess from here.
+
+Entrypoints (invoked from bootstrap.sh / bootstrap.ps1):
+    python3 lib/main.py [--reconfigure] [--quiet]
+"""
+from __future__ import annotations
+import argparse, json, os, signal, subprocess, sys, tempfile
+from pathlib import Path
+
+LIB_DIR = Path(__file__).resolve().parent
+ROOT    = LIB_DIR.parent
+sys.path.insert(0, str(LIB_DIR))
+
+import bw            # noqa: E402
+import config        # noqa: E402
+import driver        # noqa: E402
+import machine_config as mc  # noqa: E402
+import identity_ops  # noqa: E402
+import tui           # noqa: E402
+
+
+# ── Logging helpers ─────────────────────────────────────────────────────────
+
+def log(msg: str) -> None:
+    print(f"==> {msg}", file=sys.stderr, flush=True)
+
+def warn(msg: str) -> None:
+    print(f"WARN: {msg}", file=sys.stderr, flush=True)
+
+def step(msg: str) -> None:
+    print(f"\n--- {msg} ---", file=sys.stderr, flush=True)
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+# ── Self-update (called from bootstrap.sh re-exec) ──────────────────────────
+
+def maybe_self_update() -> None:
+    """Pull the latest from origin and re-exec ourselves. The bash stub also
+    does this; this is a backstop for direct `python3 lib/main.py` calls.
+    """
+    if os.environ.get("_BOOTSTRAP_UPDATED"):
+        return
+    if not (ROOT / ".git").exists():
+        return
+    log("Updating machine-setup...")
+    subprocess.call(["git", "-C", str(ROOT), "fetch", "origin"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.call(["git", "-C", str(ROOT), "reset", "--hard", "origin/HEAD"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.environ["_BOOTSTRAP_UPDATED"] = "1"
+    os.execv(sys.executable, [sys.executable, str(LIB_DIR / "main.py"), *sys.argv[1:]])
+
+
+# ── Migration: legacy machine.toml (profile=...) ────────────────────────────
+
+def migrate_legacy(state: dict) -> dict:
+    """If state has a `_legacy.profile` field and that profile exists on disk,
+    copy its component_config + identity_overrides into the new schema."""
+    legacy = state.get("_legacy") or {}
+    profile_name = legacy.get("profile")
+    if not profile_name:
+        return state
+
+    log(f"Detected legacy machine.toml (profile={profile_name}) — migrating into new schema...")
+    profile_path = None
+    for base in (ROOT / "local/profiles", ROOT / "profiles"):
+        candidate = base / f"{profile_name}.toml"
+        if candidate.exists():
+            profile_path = candidate
+            break
+    if not profile_path:
+        warn(f"  Profile '{profile_name}' not found on disk — nothing to migrate from.")
+        return state
+
+    import tomllib
+    with profile_path.open("rb") as f:
+        profile = tomllib.load(f)
+
+    comp_cfg = state.get("component_config") or {}
+    for comp, cfg in (profile.get("component_config") or {}).items():
+        if comp not in comp_cfg:
+            comp_cfg[comp] = cfg
+        else:
+            for k, v in (cfg or {}).items():
+                comp_cfg[comp].setdefault(k, v)
+
+    ident_over = state.get("identity_overrides") or {}
+    for ident_name, ov in (profile.get("identity_overrides") or {}).items():
+        target = ident_over.setdefault(ident_name, {})
+        for at in (ov.get("applies_to") or []):
+            host = at.get("host")
+            if not host:
+                continue
+            sub = target.setdefault(host, {})
+            for k, v in at.items():
+                if k == "host":
+                    continue
+                sub.setdefault(k, v)
+        for k, v in ov.items():
+            if k == "applies_to":
+                continue
+            if not isinstance(v, dict):
+                target.setdefault(k, v)
+
+    extra = state.get("extra_components") or []
+    legacy_components = legacy.get("components") or profile.get("components") or []
+    for c in legacy_components:
+        if c not in extra:
+            extra.append(c)
+
+    state["component_config"]   = comp_cfg
+    state["identity_overrides"] = ident_over
+    state["extra_components"]   = extra
+    state.pop("_legacy", None)
+    log("  Migrated component_config + identity_overrides from profile.")
+    return state
+
+
+# ── Pickers (subprocess to lib/tui.py) ──────────────────────────────────────
+
+def _run_tui(*subcmd_args: str) -> str:
+    """Run lib/tui.py with the given args, return stdout (stripped)."""
+    cmd = [sys.executable, str(LIB_DIR / "tui.py"), *subcmd_args]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 130:
+        die("Aborted by user.", 130)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        die(f"TUI step failed (exit {proc.returncode})", proc.returncode)
+    sys.stderr.write(proc.stderr)  # forward any logs
+    return proc.stdout.rstrip("\n")
+
+
+_NEW_IDENT_TAG = "__create_new_identity__"
+
+
+def pick_identities(state: dict, force: bool, quiet: bool) -> None:
+    if os.environ.get("MACHINE_SETUP_IDENTITIES"):
+        state["identities"] = [n for n in os.environ["MACHINE_SETUP_IDENTITIES"].split(",") if n]
+        log(f"Using identities from MACHINE_SETUP_IDENTITIES: {','.join(state['identities'])}")
+        return
+    if state.get("identities") and not force:
+        log(f"Using saved identities: {','.join(state['identities'])}")
+        return
+    if quiet:
+        log("Quiet mode: keeping saved identities.")
+        return
+
+    while True:
+        # available list = identities discovered + any TOML fallbacks. We use
+        # config.list_known_identities which already merges them.
+        os.environ["MACHINE_SETUP_IDENTITY_REGISTRY"] = str(_REGISTRY_FILE)
+        available = config.list_known_identities()
+
+        picked_csv = _run_tui(
+            "pick-identities",
+            "--available", json.dumps(available),
+            "--selected",  ",".join(state.get("identities") or []),
+        )
+        picked = [n for n in picked_csv.split(",") if n]
+        if _NEW_IDENT_TAG in picked:
+            picked = [n for n in picked if n != _NEW_IDENT_TAG]
+            state["identities"] = picked
+            create_identity_wizard()
+            continue
+        state["identities"] = picked
+        break
+
+
+def create_identity_wizard() -> None:
+    """Drop the user into the wizard, then refresh the registry in place."""
+    payload = _run_tui("wizard-create-identity")
+    inputs = json.loads(payload)
+    ok = identity_ops.create_identity_interactive(
+        name=inputs["name"],
+        git_name=inputs["git_name"],
+        git_email=inputs["git_email"],
+        is_default=(inputs.get("default") == "true"),
+        host=inputs.get("host", ""),
+        credential_helper=inputs.get("credential_helper", "ssh"),
+    )
+    if not ok:
+        warn("Identity creation failed")
+        return
+    # Refresh the registry file so the picker re-shows with the new entry
+    bw.write_identity_registry(_REGISTRY_FILE)
+
+
+def pick_auth(state: dict, quiet: bool) -> None:
+    if quiet:
+        log("Quiet mode: keeping existing auth settings.")
+        return
+    if not state.get("identities"):
+        return
+
+    pairs: list[dict] = []
+    existing = state.get("identity_overrides") or {}
+    for name in state["identities"]:
+        try:
+            ident = config.load_identity(name)
+        except FileNotFoundError:
+            warn(f"identity '{name}' not in registry/TOML — skipping in auth picker")
+            continue
+        for at in (ident.get("applies_to") or []):
+            host = at.get("host")
+            if not host:
+                continue
+            current = (
+                existing.get(name, {}).get(host, {}).get("credential_helper")
+                or at.get("credential_helper") or "ssh"
+            )
+            pairs.append({"identity": name, "host": host, "current_helper": current})
+    if not pairs:
+        return
+
+    new_overrides_json = _run_tui(
+        "pick-auth",
+        "--pairs",   json.dumps(pairs),
+        "--current", json.dumps(existing),
+    )
+    state["identity_overrides"] = json.loads(new_overrides_json)
+
+
+def pick_components(state: dict, os_tag: str, force: bool, quiet: bool) -> None:
+    if os.environ.get("MACHINE_SETUP_COMPONENTS"):
+        state["extra_components"] = [c for c in os.environ["MACHINE_SETUP_COMPONENTS"].split(",") if c]
+        log(f"Using extra components from MACHINE_SETUP_COMPONENTS")
+        return
+    if state.get("extra_components") and not force:
+        log(f"Using saved extra components: {','.join(state['extra_components'])}")
+        return
+    if quiet:
+        log("Quiet mode: keeping saved extra components.")
+        return
+
+    required = config._required_components(state.get("identities") or [], os_tag)
+    available = []
+    for c in config.list_all_components():
+        if os_tag not in c.get("supported", []):
+            continue
+        available.append(c)
+
+    picked_csv = _run_tui(
+        "pick-components",
+        "--required",  ",".join(required),
+        "--available", json.dumps(available),
+        "--selected",  ",".join(state.get("extra_components") or []),
+    )
+    state["extra_components"] = [c for c in picked_csv.split(",") if c]
+
+
+def prompt_component_config(state: dict, os_tag: str, quiet: bool) -> None:
+    if quiet:
+        return
+    plan = driver.build_plan(
+        identities=state.get("identities") or [],
+        extra_components=state.get("extra_components") or [],
+        identity_overrides=state.get("identity_overrides") or {},
+        component_config=state.get("component_config") or {},
+        os_tag=os_tag,
+    )
+    plan_components = ",".join(c["name"] for c in plan["components"])
+    new_cfg_json = _run_tui(
+        "prompt-component-config",
+        "--components", plan_components,
+        "--current",    json.dumps(state.get("component_config") or {}),
+    )
+    state["component_config"] = json.loads(new_cfg_json)
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+# Path to the registry file we'll populate post-BW-unlock. Set in main().
+_REGISTRY_FILE: Path = Path()
+
+
+def main() -> int:
+    # Ctrl+C exits cleanly with code 130 (no traceback)
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+
+    parser = argparse.ArgumentParser(prog="machine-setup")
+    parser.add_argument("--reconfigure", "-r", action="store_true",
+                        help="Re-run every picker; ignore saved selections.")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Skip pickers; use saved/env-supplied selections.")
+    args = parser.parse_args()
+
+    maybe_self_update()
+
+    step("OS detection")
+    os_tag = config.detect_os_tag()
+    log(f"OS tag: {os_tag}")
+
+    step("Load saved state")
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "machine-setup"
+    config_file = config_dir / "machine.toml"
+    if args.reconfigure and config_file.exists():
+        log("--reconfigure: clearing saved selections")
+        config_file.unlink()
+
+    raw = subprocess.run(
+        [sys.executable, str(LIB_DIR / "machine_config.py"), "load", str(config_file)],
+        capture_output=True, text=True
+    )
+    state = json.loads(raw.stdout) if raw.stdout.strip() else {}
+    state = migrate_legacy(state)
+
+    step("Bitwarden session")
+    if bw.have_bw():
+        bw.unlock()
+    else:
+        warn("bw CLI not installed yet — fresh install will install it; re-run after for BW-stored identities")
+
+    step("BW discovery")
+    global _REGISTRY_FILE
+    bw_cache = Path(tempfile.mkdtemp(prefix="machine-setup-bw-"))
+    _REGISTRY_FILE = bw_cache / "identities.json"
+    if bw.is_unlocked():
+        bw.write_identity_registry(_REGISTRY_FILE)
+    else:
+        _REGISTRY_FILE.write_text("{}")
+    os.environ["MACHINE_SETUP_IDENTITY_REGISTRY"] = str(_REGISTRY_FILE)
+
+    step("Identity selection")
+    pick_identities(state, force=args.reconfigure, quiet=args.quiet)
+
+    step("Per-identity auth")
+    pick_auth(state, quiet=args.quiet)
+
+    step("Component selection")
+    pick_components(state, os_tag, force=args.reconfigure, quiet=args.quiet)
+
+    step("Component configuration")
+    prompt_component_config(state, os_tag, quiet=args.quiet)
+
+    # Persist all state
+    config_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({
+        "identities":         state.get("identities") or [],
+        "extra_components":   state.get("extra_components") or [],
+        "identity_overrides": state.get("identity_overrides") or {},
+        "component_config":   state.get("component_config") or {},
+    })
+    proc = subprocess.run(
+        [sys.executable, str(LIB_DIR / "machine_config.py"), "dump", str(config_file)],
+        input=payload, text=True,
+    )
+    if proc.returncode != 0:
+        warn("Failed to persist machine.toml")
+    log(f"Saved selections to {config_file}")
+
+    step("Resolve plan")
+    plan = driver.build_plan(
+        identities=state.get("identities") or [],
+        extra_components=state.get("extra_components") or [],
+        identity_overrides=state.get("identity_overrides") or {},
+        component_config=state.get("component_config") or {},
+        os_tag=os_tag,
+    )
+    log(f"Components: {' '.join(c['name'] for c in plan['components'])}")
+    log(f"Identities: {' '.join(i['name'] for i in plan['identities'])}")
+
+    failed = driver.run_plan(plan, ROOT)
+    driver.print_summary(failed)
+    return 0 if not failed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

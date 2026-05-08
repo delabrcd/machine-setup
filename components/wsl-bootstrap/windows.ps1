@@ -1,4 +1,4 @@
-. "$script:MachineSetupDir\lib\WindowsHelpers.ps1"
+. "$env:MACHINE_SETUP_DIR\lib\WindowsHelpers.ps1"
 
 $cfg = Get-ComponentConfig
 $distro = if ($cfg.distro) { $cfg.distro } else { "Ubuntu" }
@@ -20,8 +20,8 @@ $env:WSLENV = ($env:WSLENV + ":BW_SESSION/u:BW_PASSWORD/u:MACHINE_SETUP_PROFILE/
 $env:MACHINE_SETUP_PROFILE = $wslProfile
 
 # Convert the Windows machine-setup path to a /mnt/<drive>/... WSL path
-$drive = $script:MachineSetupDir[0].ToString().ToLower()
-$wslDir = "/mnt/$drive" + ($script:MachineSetupDir.Substring(2) -replace '\\', '/')
+$drive = $env:MACHINE_SETUP_DIR[0].ToString().ToLower()
+$wslDir = "/mnt/$drive" + ($env:MACHINE_SETUP_DIR.Substring(2) -replace '\\', '/')
 
 Write-Log "Running bootstrap.sh inside WSL $distro with profile '$wslProfile'..."
 wsl.exe -d $distro -- bash "$wslDir/bootstrap.sh"
