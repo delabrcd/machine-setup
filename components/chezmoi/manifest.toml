@@ -1,15 +1,18 @@
 name = "chezmoi"
-description = "chezmoi-managed dotfiles (Claude Code config, MCP server registration)"
+description = "Apply the bundled chezmoi dotfiles (Claude Code config, MCP server registration)"
 supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
-# chezmoi clones a (typically GitHub-hosted) dotfiles repo, so SSH key + git
-# identity must already be set up. Its run_onchange_register-mcp-servers script
-# wires up the context7, jira (uvx), and bitbucket MCP servers, so it needs
-# claude-code present and uv installed.
-depends_on = ["claude-code", "uv", "ssh-key", "credential-helpers", "git-identity"]
+# chezmoi-source/ ships inside this repo. The component runs `chezmoi apply
+# --source $MACHINE_SETUP_DIR/chezmoi-source` — no remote clone. It also
+# exports MS_MCP_* env vars based on the plan so the MCP register template
+# knows which MCPs to wire up.
+#
+# Identity setup must be done first because the dotfiles' MCP register
+# script expects ssh keys + git config in place; uv+nvm are needed because
+# the MCPs use uvx / npx.
+depends_on = ["claude-code", "uv", "nvm", "ssh-key", "credential-helpers", "git-identity"]
 per_identity = false
 
-# The driver makes profile-level [component_config.chezmoi] available to the
-# script via the COMPONENT_CONFIG_JSON env var. Recognised keys:
-#   repo            = "https://github.com/USER/dotfiles.git"  (required)
-#   reset_entry_key = "/home/x/register-mcp-servers.sh"       (optional;
-#                     forces re-run of the matching run_onchange_ script)
+# Optional override (rare): point at a different chezmoi source dir, e.g.
+# a local/chezmoi-source overlay.
+#   [component_config.chezmoi]
+#   source = "/path/to/chezmoi/source"

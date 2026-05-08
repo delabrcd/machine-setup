@@ -286,18 +286,10 @@ def cmd_prompt_component_config(args):
 
     # The list of components that need config + their fields. Each field has
     # a label, an optional default, and a description.
+    # chezmoi-source ships inside this repo, dev-utilities + bitbucket-mcp
+    # were removed (replaced by aashari MCP run via npx). Only wsl-bootstrap
+    # has anything left to ask about — the WSL distro name.
     schema = {
-        "chezmoi": [
-            ("repo", "dotfiles repo URL (e.g. https://github.com/<you>/dotfiles.git)", None),
-        ],
-        "dev-utilities": [
-            ("repo", "git URL of repo to clone", None),
-            ("dest", "destination path (default: ~/.local/share/dev-utilities)", "~/.local/share/dev-utilities"),
-        ],
-        "bitbucket-mcp": [
-            ("path", "MCP source dir (default: ~/.local/share/dev-utilities/bitbucket-mcp)",
-                "~/.local/share/dev-utilities/bitbucket-mcp"),
-        ],
         "wsl-bootstrap": [
             ("distro", "WSL distro name (default: Ubuntu)", "Ubuntu"),
         ],
