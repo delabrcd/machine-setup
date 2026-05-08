@@ -34,6 +34,7 @@ import identity_ops  # noqa: E402
 
 
 _NEW_IDENT_TAG = "__create_new_identity__"
+_BW_MANAGER_TAG = "__bw_manager__"
 
 
 def _safe_id(s: str) -> str:
@@ -112,7 +113,23 @@ class DiscoveryScreen(Screen):
             c for c in config.list_all_components()
             if self.app.os_tag in c.get("supported", [])
         ]
-        self.app.call_from_thread(self.app.advance_to_identity)
+
+        # If the vault has zero Machine Identity items AND zero MCP secrets,
+        # this is a fresh first-time setup — push the BW manager so the user
+        # can create everything before the picker. They get back to the
+        # picker via the manager's "Done" button.
+        try:
+            ident_count = len(identity_ops.list_identity_names())
+            secrets     = identity_ops.read_mcp_secrets()
+            secrets_set = sum(1 for v in secrets.values() if v)
+        except Exception:
+            ident_count = -1
+            secrets_set = -1
+        if ident_count == 0 and secrets_set == 0:
+            self.app.call_from_thread(self.app.advance_to_identity)
+            self.app.call_from_thread(self.app.push_screen, BwManagerScreen())
+        else:
+            self.app.call_from_thread(self.app.advance_to_identity)
 
 
 # ── Identity screen ─────────────────────────────────────────────────────────
@@ -137,11 +154,12 @@ class IdentityScreen(Screen):
                 "Space toggles, Ctrl+S to continue.",
                 classes="hint",
             )
-            options = [Selection(
-                "[+] Create new identity in Bitwarden...",
-                _NEW_IDENT_TAG,
-                False,
-            )]
+            options = [
+                Selection("[~] Manage Bitwarden config (identities + MCP secrets)...",
+                          _BW_MANAGER_TAG, False),
+                Selection("[+] Create new identity in Bitwarden...",
+                          _NEW_IDENT_TAG, False),
+            ]
             for ident in self.available:
                 src = ident.get("source", "")
                 gn  = ident.get("git_name", "")
@@ -155,10 +173,13 @@ class IdentityScreen(Screen):
     def action_advance(self) -> None:
         sl: SelectionList = self.query_one("#ident-list", SelectionList)
         picked = list(sl.selected)
+        if _BW_MANAGER_TAG in picked:
+            self.app.state["identities"] = [p for p in picked if p not in (_BW_MANAGER_TAG, _NEW_IDENT_TAG)]
+            self.app.push_screen(BwManagerScreen())
+            return
         if _NEW_IDENT_TAG in picked:
-            picked = [p for p in picked if p != _NEW_IDENT_TAG]
-            self.app.state["identities"] = picked
-            self.app.exit({"action": "create_identity", "state": self.app.state})
+            self.app.state["identities"] = [p for p in picked if p != _NEW_IDENT_TAG]
+            self.app.push_screen(IdentityFormScreen(mode="create"))
             return
         self.app.state["identities"] = picked
         self.app.advance_to_auth()
@@ -674,6 +695,387 @@ class RunPlanScreen(Screen):
             "state":  self.app.state,
             "failed": self.failed,
         })
+
+
+# ── BW config wizard screens ────────────────────────────────────────────────
+
+from textual.widgets import Button  # placed near the screens that use it
+
+
+def _refresh_app_identities(app: "BootstrapApp") -> None:
+    """After a BW write, re-discover identities + repopulate the registry so
+    the picker reflects the new state on its next render."""
+    try:
+        bw.write_identity_registry(app.registry_file)
+        app.available_idents = config.list_known_identities()
+    except Exception:
+        pass
+
+
+class BwManagerScreen(Screen):
+    """Hub screen for managing the Bitwarden vault contents that machine-
+    setup cares about: Machine Identity items + the MCP-secrets item.
+    Pushed from IdentityScreen via the [~] entry, OR auto-pushed on first
+    run when the vault is empty."""
+    BINDINGS = [Binding("escape", "back", "Back to picker")]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Bitwarden config", classes="step")
+            yield Static(
+                "Set up the BW items machine-setup expects: one or more\n"
+                "'Machine Identity: <name>' items + 'Claude Code MCP Secrets'.",
+                classes="hint",
+            )
+
+            # Existing identities
+            ident_names = []
+            try:
+                ident_names = identity_ops.list_identity_names()
+            except Exception:
+                pass
+            yield Static("\n[bold]Identities[/]", classes="section-title")
+            if ident_names:
+                yield Static(f"  Found: {', '.join(ident_names)}", classes="required-list")
+            else:
+                yield Static("  (none yet)", classes="hint")
+            yield Button("Create new identity", id="btn-create-ident", variant="primary")
+            for n in ident_names:
+                yield Button(f"Edit: {n}", id=f"btn-edit-{_safe_id(n)}", name=n)
+
+            # MCP secrets
+            yield Static("\n[bold]Claude Code MCP Secrets[/]", classes="section-title")
+            try:
+                vals = identity_ops.read_mcp_secrets()
+                set_count = sum(1 for v in vals.values() if v)
+                total     = len(identity_ops.MCP_SECRETS_FIELDS)
+                yield Static(f"  {set_count}/{total} fields set", classes="hint")
+            except Exception:
+                yield Static("  (could not read)", classes="hint")
+            yield Button("Manage MCP secrets", id="btn-mcp", variant="primary")
+
+            yield Static("")
+            yield Button("Done — back to picker", id="btn-done")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "btn-create-ident":
+            self.app.push_screen(IdentityFormScreen(mode="create"))
+        elif bid.startswith("btn-edit-"):
+            self.app.push_screen(IdentityFormScreen(mode="edit", name=event.button.name))
+        elif bid == "btn-mcp":
+            self.app.push_screen(McpSecretsFormScreen())
+        elif bid == "btn-done":
+            self.app.pop_screen()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
+class IdentityFormScreen(Screen):
+    """Create or edit a Machine Identity: <name> item. Handles SSH key
+    options: generate ed25519, import from disk, paste text, or leave alone
+    on edit."""
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, mode: str = "create", name: str | None = None):
+        super().__init__()
+        self.mode = mode
+        self._initial_name = name
+        self._loaded: dict = {}
+        self._priv: str = ""
+        self._pub: str = ""
+
+    def on_mount(self) -> None:
+        if self.mode == "edit" and self._initial_name:
+            existing = identity_ops.read_identity(self._initial_name) or {}
+            self._loaded = existing
+            self._priv = existing.get("private_key", "")
+            self._pub  = existing.get("public_key", "")
+            # Hydrate inputs
+            self.query_one("#name",  Input).value = existing.get("name", self._initial_name)
+            self.query_one("#name",  Input).disabled = True   # name is the key; renaming = new item
+            self.query_one("#gname", Input).value = existing.get("git_name", "")
+            self.query_one("#gemail",Input).value = existing.get("git_email", "")
+            applies = (existing.get("applies_to") or [{}])[0]
+            self.query_one("#host",  Input).value = applies.get("host", "")
+            helper = applies.get("credential_helper", "ssh") or "ssh"
+            for v, _label in HELPER_OPTIONS:
+                if v == helper:
+                    rb = self.query_one(f"#h-{v}", RadioButton)
+                    rb.value = True
+                    break
+            self.query_one("#default", RadioButton).value = bool(existing.get("default"))
+            self._update_key_status()
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            title = "Edit identity" if self.mode == "edit" else "Create identity"
+            yield Static(title, classes="step")
+            yield Static(
+                "Field meaning + how each value is used is in README → 'Adding a new identity'.\n"
+                "Ctrl+S saves, Escape cancels.",
+                classes="hint",
+            )
+            yield Static("name (slug, [A-Za-z0-9_-])", classes="cfg-title")
+            yield Input(placeholder="personal", id="name")
+            yield Static("git_name", classes="cfg-title")
+            yield Input(placeholder="Your Name", id="gname")
+            yield Static("git_email", classes="cfg-title")
+            yield Input(placeholder="you@example.com", id="gemail")
+            yield Static("host (e.g. github.com / bitbucket.org) — optional", classes="cfg-title")
+            yield Input(placeholder="github.com", id="host")
+            yield Static("credential_helper for that host", classes="cfg-title")
+            buttons = [RadioButton(label, name=v, id=f"h-{v}", value=(v == "ssh"))
+                       for v, label in HELPER_OPTIONS]
+            yield RadioSet(*buttons, id="helper")
+            yield RadioButton("Make this the default identity (global git config)",
+                              id="default")
+
+            yield Static("\nSSH key", classes="section-title")
+            yield Static(id="key-status", classes="hint")
+            yield Button("Generate new ed25519 key (replaces any existing)", id="btn-gen-key")
+            yield Button("Import key files (paths to private + public)...",   id="btn-import-files")
+            yield Button("Paste key text...",                                  id="btn-paste-key")
+        yield Footer()
+
+    def _update_key_status(self) -> None:
+        status = self.query_one("#key-status", Static)
+        if self._priv and self._pub:
+            kind = "loaded from BW" if self.mode == "edit" else "set"
+            status.update(f"[green]✓ SSH key {kind}[/]")
+        elif self._priv or self._pub:
+            status.update("[yellow]partial — need both private and public[/]")
+        else:
+            status.update("[dim]no SSH key yet — pick one of the actions below[/]")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "btn-gen-key":
+            try:
+                priv, pub = identity_ops._gen_ed25519_keypair(
+                    comment=self.query_one("#gemail", Input).value or self.query_one("#name", Input).value
+                )
+                self._priv = priv
+                self._pub  = pub
+                self._update_key_status()
+            except Exception as e:
+                self.query_one("#key-status", Static).update(f"[red]ssh-keygen failed: {e}[/]")
+        elif bid == "btn-import-files":
+            self.app.push_screen(SshKeyFilesScreen(self))
+        elif bid == "btn-paste-key":
+            self.app.push_screen(SshKeyPasteScreen(self))
+
+    def set_keys(self, priv: str, pub: str) -> None:
+        self._priv = priv
+        self._pub  = pub
+        self._update_key_status()
+
+    def action_save(self) -> None:
+        name   = (self.query_one("#name", Input).value or "").strip()
+        gname  = (self.query_one("#gname", Input).value or "").strip()
+        gemail = (self.query_one("#gemail", Input).value or "").strip()
+        host   = (self.query_one("#host", Input).value or "").strip()
+        is_def = self.query_one("#default", RadioButton).value
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            self.query_one("#key-status", Static).update("[red]name must be alphanumeric / -_ [/]")
+            return
+
+        helper = "ssh"
+        for v, _label in HELPER_OPTIONS:
+            if self.query_one(f"#h-{v}", RadioButton).value:
+                helper = v
+                break
+
+        applies_to: list[dict] = []
+        if host:
+            applies_to.append({
+                "host": host,
+                "git_url_patterns": [f"git@{host}:*/*", f"https://{host}/*/*"],
+                "credential_helper": helper,
+            })
+
+        ok = identity_ops.upsert_identity(
+            name,
+            git_name=gname,
+            git_email=gemail,
+            is_default=bool(is_def),
+            applies_to=applies_to,
+            private_key=self._priv,
+            public_key=self._pub,
+        )
+        if not ok:
+            self.query_one("#key-status", Static).update("[red]save failed — see terminal log[/]")
+            return
+        _refresh_app_identities(self.app)
+        self.app.pop_screen()
+
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
+
+
+class SshKeyFilesScreen(Screen):
+    """Sub-screen: read SSH key from two file paths."""
+    BINDINGS = [
+        Binding("ctrl+s", "load", "Load"),
+        Binding("escape", "back", "Cancel"),
+    ]
+
+    def __init__(self, parent_form: IdentityFormScreen):
+        super().__init__()
+        self.parent_form = parent_form
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Import SSH key from disk", classes="step")
+            yield Static(
+                "Paths to existing OpenSSH key files. Common defaults:\n"
+                "  ~/.ssh/id_ed25519       (private)\n"
+                "  ~/.ssh/id_ed25519.pub   (public)",
+                classes="hint",
+            )
+            yield Static("Private key path", classes="cfg-title")
+            yield Input(placeholder=str(Path.home() / ".ssh/id_ed25519"), id="priv-path")
+            yield Static("Public key path", classes="cfg-title")
+            yield Input(placeholder=str(Path.home() / ".ssh/id_ed25519.pub"), id="pub-path")
+            yield Static(id="files-status", classes="hint")
+            yield Button("Load (Ctrl+S)", id="btn-load")
+        yield Footer()
+
+    def action_load(self) -> None:
+        priv_p = (self.query_one("#priv-path", Input).value or "").strip()
+        pub_p  = (self.query_one("#pub-path",  Input).value or "").strip()
+        if not priv_p or not pub_p:
+            self.query_one("#files-status", Static).update("[red]both paths required[/]")
+            return
+        try:
+            priv = Path(priv_p).expanduser().read_text()
+            pub  = Path(pub_p).expanduser().read_text()
+        except Exception as e:
+            self.query_one("#files-status", Static).update(f"[red]read failed: {e}[/]")
+            return
+        self.parent_form.set_keys(priv, pub)
+        self.app.pop_screen()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-load":
+            self.action_load()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
+class SshKeyPasteScreen(Screen):
+    """Sub-screen: paste private/public key text directly."""
+    BINDINGS = [
+        Binding("ctrl+s", "load", "Load"),
+        Binding("escape", "back", "Cancel"),
+    ]
+
+    def __init__(self, parent_form: IdentityFormScreen):
+        super().__init__()
+        self.parent_form = parent_form
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Paste SSH key text", classes="step")
+            yield Static(
+                "Paste each on a single line (Input widgets are line-oriented).\n"
+                "For multi-line keys use the 'Import key files' option.\n"
+                "Or paste base64-only blob for the body and we'll wrap it.",
+                classes="hint",
+            )
+            yield Static("Private key (full -----BEGIN ... END----- block)", classes="cfg-title")
+            yield Input(password=True, placeholder="-----BEGIN OPENSSH PRIVATE KEY-----...-----END...-----", id="priv-text")
+            yield Static("Public key (single ssh-ed25519/rsa/... line)", classes="cfg-title")
+            yield Input(placeholder="ssh-ed25519 AAAA... comment", id="pub-text")
+            yield Static(id="paste-status", classes="hint")
+            yield Button("Load (Ctrl+S)", id="btn-load")
+        yield Footer()
+
+    def action_load(self) -> None:
+        priv = (self.query_one("#priv-text", Input).value or "").strip()
+        pub  = (self.query_one("#pub-text",  Input).value or "").strip()
+        if not priv or not pub:
+            self.query_one("#paste-status", Static).update("[red]both fields required[/]")
+            return
+        # Auto-wrap if user pasted only the base64 body
+        if not priv.startswith("-----BEGIN"):
+            priv = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + priv + "\n-----END OPENSSH PRIVATE KEY-----"
+        self.parent_form.set_keys(priv, pub)
+        self.app.pop_screen()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-load":
+            self.action_load()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
+class McpSecretsFormScreen(Screen):
+    """Edit the Claude Code MCP Secrets BW item (creates if missing).
+    All fields shown together — Ctrl+S saves them all atomically."""
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save"),
+        Binding("escape", "back", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Claude Code MCP Secrets", classes="step")
+            yield Static(
+                "Field values used by the chezmoi MCP-register script. Hidden\n"
+                "fields are stored as 'hidden' type in BW. Empty values overwrite\n"
+                "(deterministic). Ctrl+S to save.",
+                classes="hint",
+            )
+            try:
+                current = identity_ops.read_mcp_secrets()
+            except Exception as e:
+                yield Static(f"[red]could not read existing values: {e}[/]")
+                current = {}
+            for fname, hidden, label, placeholder in identity_ops.MCP_SECRETS_FIELDS:
+                yield Static(f"{label}  ([dim]{fname}[/])", classes="cfg-title")
+                yield Input(
+                    value=current.get(fname, "") or "",
+                    password=hidden,
+                    placeholder=placeholder,
+                    id=f"f-{_safe_id(fname)}",
+                )
+            yield Static(id="mcp-status", classes="hint")
+            yield Button("Save (Ctrl+S)", id="btn-mcp-save")
+        yield Footer()
+
+    def action_save(self) -> None:
+        values = {}
+        for fname, _hidden, _label, _placeholder in identity_ops.MCP_SECRETS_FIELDS:
+            values[fname] = (self.query_one(f"#f-{_safe_id(fname)}", Input).value or "").strip()
+        ok = identity_ops.write_mcp_secrets(values)
+        status = self.query_one("#mcp-status", Static)
+        if ok:
+            status.update("[green]saved[/]")
+            # auto-pop after a short pause is hard without timers; just pop now
+            self.app.pop_screen()
+        else:
+            status.update("[red]save failed — see terminal log[/]")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-mcp-save":
+            self.action_save()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
 
 
 # ── App ─────────────────────────────────────────────────────────────────────

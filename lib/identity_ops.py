@@ -166,6 +166,174 @@ def create_identity_interactive(
     return True
 
 
+def read_identity(name: str) -> dict | None:
+    """Read a Machine Identity item from BW into a dict suitable for the
+    edit form (name, git_name, git_email, ssh_key_basename, default,
+    applies_to, private_key, public_key). None if the item doesn't exist.
+    """
+    item = bw.get_item_exact(f"Machine Identity: {name}")
+    if not item:
+        return None
+    fields = {f.get("name"): f.get("value") for f in (item.get("fields") or [])}
+    applies_to: list[dict] = []
+    raw = fields.get("applies_to_json", "")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                applies_to = parsed
+        except json.JSONDecodeError:
+            pass
+    return {
+        "name":             name,
+        "git_name":         fields.get("git_name", ""),
+        "git_email":        fields.get("git_email", ""),
+        "ssh_key_basename": fields.get("ssh_key_basename") or f"id_ed25519_{name}",
+        "default":          (fields.get("default") or "").strip().lower() == "true",
+        "applies_to":       applies_to,
+        "private_key":      fields.get("private_key", "") or "",
+        "public_key":       fields.get("public_key", "") or "",
+    }
+
+
+def list_identity_names() -> list[str]:
+    """All Machine Identity item names currently in BW (post-prefix)."""
+    out: list[str] = []
+    for item in bw.list_items():
+        name = item.get("name") or ""
+        if name.startswith("Machine Identity: "):
+            out.append(name[len("Machine Identity: "):].strip())
+    return sorted(set(filter(None, out)))
+
+
+# ── MCP Secrets item ────────────────────────────────────────────────────────
+
+MCP_SECRETS_ITEM = "Claude Code MCP Secrets"
+
+# (field_name, hidden, label, placeholder)
+MCP_SECRETS_FIELDS: list[tuple[str, bool, str, str]] = [
+    ("context7_api_key",     True,  "context7 API key",                "ctx7_..."),
+    ("bitbucket_email",      False, "Bitbucket account email",         "you@example.com"),
+    ("bitbucket_api_token",  True,  "Bitbucket API token (scoped)",    "ATATT..."),
+    ("bitbucket_workspace",  False, "Bitbucket workspace slug",        "your-workspace"),
+    ("jira_url",             False, "Jira server URL",                 "https://jira.example.com"),
+    ("jira_pat",             True,  "Jira PAT",                        "..."),
+]
+
+
+def read_mcp_secrets() -> dict[str, str]:
+    """Return current values for every known MCP-secrets field. Missing
+    item / missing fields → empty string."""
+    item = bw.get_item_exact(MCP_SECRETS_ITEM)
+    if not item:
+        return {name: "" for name, _h, _l, _p in MCP_SECRETS_FIELDS}
+    fields = {f.get("name"): f.get("value") for f in (item.get("fields") or [])}
+    return {name: fields.get(name, "") or "" for name, _h, _l, _p in MCP_SECRETS_FIELDS}
+
+
+def write_mcp_secrets(values: dict[str, str]) -> bool:
+    """Create or update the Claude Code MCP Secrets BW item with the given
+    field values. Empty strings are still written (overwrites stale data
+    deterministically). Returns True on success."""
+    existing = bw.get_item_exact(MCP_SECRETS_ITEM)
+    desired = []
+    for name, hidden, _label, _placeholder in MCP_SECRETS_FIELDS:
+        desired.append({
+            "name":  name,
+            "value": values.get(name, "") or "",
+            "type":  1 if hidden else 0,
+        })
+
+    if existing:
+        _log(f"Updating BW item: {MCP_SECRETS_ITEM}")
+        by_name = {f.get("name"): f for f in (existing.get("fields") or [])}
+        for d in desired:
+            if d["name"] in by_name:
+                by_name[d["name"]]["value"] = d["value"]
+                by_name[d["name"]]["type"]  = d["type"]
+            else:
+                existing.setdefault("fields", []).append(d)
+        return bw.encode_and_edit(existing["id"], existing)
+    else:
+        _log(f"Creating BW item: {MCP_SECRETS_ITEM}")
+        template = _bw_template_item()
+        template.update({
+            "type":       2,
+            "name":       MCP_SECRETS_ITEM,
+            "secureNote": {"type": 0},
+            "fields":     desired,
+        })
+        return bw.encode_and_create(template) is not None
+
+
+# ── SSH key import (existing key into a Machine Identity item) ──────────────
+
+def import_ssh_key_text(name: str, private_key: str, public_key: str) -> bool:
+    """Update an existing Machine Identity: <name> item's private_key /
+    public_key fields with provided text. Errors if the item doesn't exist.
+    """
+    item = bw.get_item_exact(f"Machine Identity: {name}")
+    if not item:
+        _warn(f"identity '{name}' not found in BW — create it first")
+        return False
+    fields = item.get("fields") or []
+    by_name = {f.get("name"): f for f in fields}
+    for fld_name, val, hidden in [
+        ("private_key", private_key.strip() + "\n", True),
+        ("public_key",  public_key.strip()  + "\n", False),
+    ]:
+        f_type = 1 if hidden else 0
+        if fld_name in by_name:
+            by_name[fld_name]["value"] = val
+            by_name[fld_name]["type"]  = f_type
+        else:
+            fields.append({"name": fld_name, "value": val, "type": f_type})
+    item["fields"] = fields
+    return bw.encode_and_edit(item["id"], item)
+
+
+def import_ssh_key_files(name: str, private_path: Path | str, public_path: Path | str) -> bool:
+    """Read an OpenSSH keypair from disk and import via import_ssh_key_text."""
+    p_priv = Path(private_path)
+    p_pub  = Path(public_path)
+    if not p_priv.is_file():
+        _warn(f"private key not found: {p_priv}")
+        return False
+    if not p_pub.is_file():
+        _warn(f"public key not found: {p_pub}")
+        return False
+    return import_ssh_key_text(name, p_priv.read_text(), p_pub.read_text())
+
+
+# ── Generic identity edit ───────────────────────────────────────────────────
+
+def update_identity(
+    name: str,
+    *,
+    git_name: str | None = None,
+    git_email: str | None = None,
+    is_default: bool | None = None,
+    applies_to: list[dict] | None = None,
+    ssh_key_basename: str | None = None,
+) -> bool:
+    """In-place update of an existing Machine Identity item. Only fields
+    passed (non-None) are changed. SSH key fields are left alone."""
+    cur = read_identity(name)
+    if cur is None:
+        _warn(f"identity '{name}' not found — use upsert_identity to create")
+        return False
+    return upsert_identity(
+        name,
+        git_name        = git_name        if git_name        is not None else cur["git_name"],
+        git_email       = git_email       if git_email       is not None else cur["git_email"],
+        ssh_key_basename= ssh_key_basename if ssh_key_basename is not None else cur["ssh_key_basename"],
+        is_default      = is_default      if is_default      is not None else cur["default"],
+        applies_to      = applies_to      if applies_to      is not None else cur["applies_to"],
+        private_key     = cur["private_key"],
+        public_key      = cur["public_key"],
+    )
+
+
 def migrate_from_toml(toml_path: Path | str, ssh_from: str | None = None) -> bool:
     """Read an identity TOML file and upsert as a Machine Identity in BW.
     If ssh_from is given (or the TOML has a bw_ssh_item field), copy SSH

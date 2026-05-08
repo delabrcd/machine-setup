@@ -74,24 +74,33 @@ MACHINE_SETUP_COMPONENTS=claude-code,uv bash bootstrap.sh      # env-pin extras
 ## First-run flow
 
 1. **Bitwarden unlock + identity discovery** — vault unlocked early; every
-   `Machine Identity: *` item is listed.
-2. **Identity picker** — pick which identities to install. Includes a
-   `[+] Create a new identity in Bitwarden...` entry that drops into a
-   wizard (name, email, host, helper, generates ed25519, stores in BW).
-3. **Per-identity auth picker** — for each chosen identity-host pair,
+   `Machine Identity: *` item + the `Claude Code MCP Secrets` item are
+   discovered.
+2. **First-time setup auto-detect** — if the vault has zero identity
+   items AND zero MCP secrets, the BW config manager pushes itself
+   automatically so you can populate the vault before the picker.
+3. **Identity picker** — pick which identities to install. The first two
+   entries are:
+   - `[~] Manage Bitwarden config...` — opens the manager any time
+   - `[+] Create new identity in Bitwarden...` — fast path to a single
+     identity creation form (same form the manager uses)
+4. **Per-identity auth picker** — for each chosen identity-host pair,
    confirm or override the credential helper (`ssh` / `gcm` / `bitwarden` /
    `none`). Override is per-machine, so the same identity can use SSH at
    home and GCM on a work box.
-4. **Component picker** — required components are derived from your
+5. **Component picker** — required components are derived from your
    identity choices (`packages`, `git-base`, `git-identity`, `bw-cli`,
    `ssh-key`, `credential-helpers`) and shown as info. Optional components
-   are toggleable: `claude-code`, `chezmoi`, `uv`, `dev-utilities`,
-   `bitbucket-mcp`, `wsl-bootstrap`, `bw-unlock-shell`, etc.
-5. **Component configuration** — for any selected optional component that
-   needs it (`chezmoi.repo`, `dev-utilities.repo`, etc.), prompts for the
+   are toggleable: `claude-code`, `chezmoi`, `uv`, `mcp-context7`,
+   `mcp-bitbucket`, `mcp-jira`, `wsl-bootstrap`, `bw-unlock-shell`, etc.
+6. **Component configuration** — for any selected optional component
+   that needs it (today only `wsl-bootstrap.distro`), prompts for the
    value if not already saved.
-6. **Run** — components execute in dependency order; per-identity
-   components loop over each selected identity.
+7. **Sudo** — captures sudo password into the cache via `sudo -S -v` so
+   component installs don't prompt mid-run.
+8. **Run** — components execute in dependency order, output streamed
+   into a RichLog; per-identity components loop over each selected
+   identity.
 
 All decisions persist to `~/.config/machine-setup/machine.toml`. Re-pick
 with `--reconfigure`, edit the file directly, or delete it to start fresh.
@@ -105,52 +114,104 @@ with `--reconfigure`, edit the file directly, or delete it to start fresh.
 | `bw-cli`             | Bitwarden CLI                                           | no           |
 | `uv`                 | uv (Astral) Python runner                               | no           |
 | `claude-code`        | Anthropic Claude Code CLI (native installer on each OS) | no           |
-| `chezmoi`            | Apply a configured dotfiles repo                        | no           |
+| `chezmoi`            | Apply the in-repo `chezmoi-source/` dotfiles            | no           |
 | `git-base`           | Identity-agnostic git config + ssh-agent service        | no           |
 | `git-identity`       | user.name/email/signing-key (with `includeIf` for non-defaults) | yes  |
 | `ssh-key`            | Restore-from-BW or generate-and-store SSH keypair       | yes          |
 | `credential-helpers` | HTTPS helpers per identity (`gcm`, `bitwarden`, `ssh`)  | yes          |
 | `bw-unlock-shell`    | Per-session `bw-unlock` function in shell rc / PS profile | no         |
 | `wsl-interop`        | Re-register WSLInterop binfmt (WSL only)                | no           |
-| `wsl-bootstrap`      | From Windows host: invoke bootstrap.sh inside WSL       | no           |
-| `dev-utilities`      | Clone/reset an arbitrary git repo at a configured path  | no           |
-| `bitbucket-mcp`      | `npm install && npm run build` in a configured dir      | no           |
+| `wsl-bootstrap`      | From Windows host: invoke bootstrap inside WSL          | no           |
+| `mcp-context7`       | Enable the context7 MCP (signal — chezmoi registers it) | no           |
+| `mcp-bitbucket`      | Enable the Bitbucket MCP (aashari, signal-only)         | no           |
+| `mcp-jira`           | Enable the Jira MCP (sooperset/mcp-atlassian, signal)   | no           |
 
 Add your own component as a directory under `components/<name>/` with a
 `manifest.toml`. Components without a script for the current OS are
 skipped silently.
 
-## Adding a new identity
+## Bitwarden config (identities + MCP secrets)
 
-### Option 1: from the bootstrap picker
+The bootstrap ships with an in-TUI **BW config manager** so you don't
+have to edit your vault by hand. It's accessible two ways:
 
-The identity picker has a `[+] Create a new identity in Bitwarden...`
-entry. Pick it and answer the prompts; the wizard generates the SSH key
-and stores everything in BW.
+### First-time setup (empty vault)
 
-### Option 2: from the CLI
+The bootstrap detects a fresh vault — no `Machine Identity:` items and
+no `Claude Code MCP Secrets` item — and pushes the manager automatically
+right after BW unlock. Walk through:
 
-```sh
-export BW_SESSION="$(bw unlock --raw)"
+1. **Create new identity** — name, git_name, git_email, host, credential
+   helper. Then for the SSH key, choose:
+   - *Generate new ed25519* — fresh keypair, stored in the BW item
+   - *Import key files* — point at existing `~/.ssh/id_ed25519` + `.pub`
+     paths, contents are uploaded into the BW item
+   - *Paste key text* — paste OpenSSH-format private + public blocks
+2. Repeat for each identity you want (personal, work, etc.).
+3. **Manage MCP secrets** — single form for `context7_api_key`,
+   `bitbucket_email` / `bitbucket_api_token` / `bitbucket_workspace`,
+   `jira_url` / `jira_pat`. Hidden fields stored as `type: 1`.
+4. **Done** — back to the identity picker.
 
-# Interactive — prompts for name/email/host/helper:
-./tools/seed-bw-identity.sh new personal
+### Editing later
 
-# Migrate an existing local TOML + existing standalone BW SSH-key item:
-./tools/seed-bw-identity.sh from-toml local/identities/work.toml \
-    --ssh-from "Machine SSH Key Work"
-```
+The identity picker's first entry is
+`[~] Manage Bitwarden config (identities + MCP secrets)...`. Toggle it
+on, Ctrl+S → manager screen → pick `Edit: <name>` for any identity, or
+`Manage MCP secrets` to update keys. Saves go straight to BW; the
+picker re-renders with the latest list when you return.
 
-PowerShell equivalents at `tools\seed-bw-identity.ps1`.
+### Field reference
 
-### Option 3: directly in the Bitwarden web UI
+**Machine Identity item** (BW item name: `Machine Identity: <name>`):
 
-Create a Secure Note named `Machine Identity: <yourname>` with the
-fields listed above. `applies_to_json` example:
+| Field              | Type   | Purpose                                                |
+| ------------------ | ------ | ------------------------------------------------------ |
+| `git_name`         | text   | git `user.name`                                        |
+| `git_email`        | text   | git `user.email`                                       |
+| `ssh_key_basename` | text   | optional, defaults to `id_ed25519_<name>`              |
+| `default`          | text   | `"true"` for the global default identity               |
+| `applies_to_json`  | text   | per-host config (see below)                            |
+| `public_key`       | text   | OpenSSH public                                         |
+| `private_key`      | hidden | OpenSSH private                                        |
+
+`applies_to_json` example:
 
 ```json
 [{"host":"github.com","git_url_patterns":["git@github.com:*/*","https://github.com/*/*"],"credential_helper":"ssh"}]
 ```
+
+**Claude Code MCP Secrets item** (one BW item, all field names exactly
+as below; field types in parentheses):
+
+| Field                  | Type   | Used by         |
+| ---------------------- | ------ | --------------- |
+| `context7_api_key`     | hidden | context7 MCP    |
+| `bitbucket_email`      | text   | bitbucket MCP   |
+| `bitbucket_api_token`  | hidden | bitbucket MCP   |
+| `bitbucket_workspace`  | text   | bitbucket MCP (default workspace) |
+| `jira_url`             | text   | jira MCP        |
+| `jira_pat`             | hidden | jira MCP        |
+
+The chezmoi `run_onchange_register-mcp-servers` template reads these at
+chezmoi-apply time (runtime `bw get item`, never inlined into rendered
+files) and emits `claude mcp add` calls — gated on which `mcp-*`
+components you picked in the bootstrap.
+
+### Power-user CLI alternative
+
+If you'd rather script it:
+
+```sh
+export BW_SESSION="$(bw unlock --raw)"
+./tools/seed-bw-identity.sh new personal               # interactive identity create
+./tools/seed-bw-identity.sh from-toml local/identities/work.toml \
+    --ssh-from "Machine SSH Key Work"                  # one-shot migration
+```
+
+PowerShell equivalent at `tools\seed-bw-identity.ps1`. The TUI manager
+covers everything these tools do plus MCP-secrets editing and SSH-key
+import-from-file/paste, so you'll rarely need them.
 
 ## Per-machine identity overrides
 

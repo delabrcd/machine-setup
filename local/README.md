@@ -2,120 +2,72 @@
 
 Everything here (except this README and `.gitkeep`) is **gitignored**. At
 bootstrap time the loader checks `local/` first, then falls back to the
-in-repo defaults — so you can override any profile, identity, or component
-without leaking anything into public history.
+in-repo defaults.
 
-## Directory layout
+In the current architecture, almost everything that used to live in
+`local/` has moved:
 
-```
-local/
-├── profiles/<name>.toml      # private profile bindings (chezmoi.repo, dev-utilities.repo, etc.)
-├── identities/<name>.toml    # OPTIONAL — TOML fallback for identities not in Bitwarden
-└── components/<name>/        # per-component overrides (manifest + scripts)
-    ├── manifest.toml
-    └── linux.sh
-```
+- **Identities** → Bitwarden (`Machine Identity: <name>` items, managed
+  via the in-TUI BW config wizard or the seed-bw-identity tools)
+- **Profiles** → gone, replaced by per-machine `~/.config/machine-setup/machine.toml`
+- **chezmoi source** → ships in-repo at `<repo>/chezmoi-source/`
 
-## Recommended: identities live in Bitwarden, not here
+So `local/` is mostly empty by default. It still serves as the escape
+hatch for two things:
 
-The bootstrap discovers identities at runtime from BW items named
-`Machine Identity: <name>`. See the top-level README for the field
-schema. The TOML fallback below is only useful if you genuinely don't
-want to use Bitwarden for an identity (rare).
+## When you'd actually use `local/`
 
-## Typical usage: adding a work overlay
+### 1. TOML-fallback identity (instead of Bitwarden)
 
-### 1. Create a work identity in Bitwarden
-
-Easiest way: use the helper.
-
-```sh
-export BW_SESSION="$(bw unlock --raw)"
-~/.local/share/machine-setup/tools/seed-bw-identity.sh new work
-```
-
-It prompts for `git_name`, `git_email`, host (e.g. `bitbucket.org`), and
-credential helper (e.g. `ssh`); generates a fresh ed25519 key; stores
-everything in a BW item called `Machine Identity: work`. Then register
-the printed public key on the relevant service.
-
-If you already have a TOML identity + an existing BW SSH-key item:
-
-```sh
-~/.local/share/machine-setup/tools/seed-bw-identity.sh from-toml local/identities/work.toml \
-    --ssh-from "Machine SSH Key Work"
-```
-
-### 2. Drop a work profile in `local/profiles/`
+If for some reason you don't want a particular identity in Bitwarden:
 
 ```toml
-# local/profiles/work-desktop.toml
-name = "work-desktop"
-description = "Work desktop — personal + work identities, dev-utilities, MCPs"
+# local/identities/scratch.toml
+name = "scratch"
+git_name = "Scratch User"
+git_email = "scratch@example.com"
+ssh_key_basename = "id_ed25519_scratch"
+default = false
 
-components = [
-    "packages", "nvm", "bw-cli", "uv",
-    "git-base", "git-identity", "ssh-key", "credential-helpers",
-    "bw-unlock-shell",
-    "claude-code", "chezmoi",
-    "dev-utilities", "bitbucket-mcp",
-]
+[[applies_to]]
+host = "github.com"
+git_url_patterns = ["git@github.com:*/*", "https://github.com/*/*"]
+credential_helper = "ssh"
+```
 
-# Empty list means "show the picker over BW-discovered identities".
-# Pre-pin specific names here if you want to skip the picker.
-identities = []
+The picker shows it with a `[local-toml]` source tag.
 
+### 2. chezmoi source override
+
+Want to point chezmoi at your *own* dotfiles repo or a custom local copy
+instead of the bundled `chezmoi-source/`? Edit `~/.config/machine-setup/machine.toml`:
+
+```toml
 [component_config.chezmoi]
-repo = "https://github.com/yourname/dotfiles.git"
-
-[component_config.dev-utilities]
-repo = "git@bitbucket.org:workspace-name/dev-utilities.git"
-dest = "~/.local/share/dev-utilities"
-
-[component_config.bitbucket-mcp]
-path = "~/.local/share/dev-utilities/bitbucket-mcp"
-
-# On work machines, override the personal identity's github.com helper from
-# its default (ssh) to gcm — corporate networks often gate GitHub behind SSO
-# which only works through the OAuth flow. The override is merged onto the
-# identity's applies_to entry that matches `host = "github.com"`.
-[[identity_overrides.personal.applies_to]]
-host = "github.com"
-credential_helper = "gcm"
+source = "/path/to/your/chezmoi/source/dir"
 ```
 
-That's it — `bash bootstrap.sh` will offer the new profile in the
-profile picker, then offer your `personal` and `work` BW identities in
-the identity picker.
+Or symlink `local/chezmoi-source/` into place and reference it via the
+same key.
 
-## Per-profile identity tweaks
+### 3. Custom components
 
-The `[[identity_overrides.<name>.applies_to]]` block above is the
-escape hatch when one identity needs different behavior on different
-profiles. Common case: `credential_helper` (ssh on personal machines,
-gcm on work machines). It also works for any other applies_to field
-(`bw_credential_item`, `register_url`, etc.) and for top-level identity
-fields too:
+Drop in `local/components/<name>/manifest.toml` + `linux.sh` /
+`windows.ps1` to add a per-machine component the public repo doesn't have.
 
-```toml
-[identity_overrides.personal]
-ssh_key_basename = "id_ed25519_personal_alt"   # override top-level field
+## Setting up Bitwarden for the first time
 
-[[identity_overrides.personal.applies_to]]
-host = "github.com"
-credential_helper = "gcm"
-```
+You don't need to author files in `local/` for this anymore — the
+bootstrap's BW config manager handles it. On a fresh vault:
 
-Override matching is by `host`. If no existing applies_to entry has
-that host, the override is appended as a new entry.
+1. Run the bootstrap (`curl|bash` one-liner from the top README).
+2. Enter your BW master password at the unlock screen.
+3. The vault is empty → BW manager auto-launches.
+4. Click "Create new identity" — fill in name, email, host, helper,
+   then choose Generate / Import-from-files / Paste for the SSH key.
+5. Click "Manage MCP secrets" — fill in API keys + URLs.
+6. Click "Done".
+7. Bootstrap continues with the picker, MCPs, plan execution.
 
-## Keeping `local/` synced across machines
-
-Since this directory is gitignored, you have to bring it onto each new
-machine yourself. Identities don't need this — they sync via Bitwarden
-automatically. The remaining file (`local/profiles/work-desktop.toml`
-or similar) is small and easy to move:
-
-- **Bitwarden secure note** — paste the TOML into one BW note, recreate the file on each machine
-- **Private gist / repo** — clone into `local/` after the first bootstrap
-- **rsync / scp** — fastest one-off (`tools/install-remote.sh` does this automatically when bootstrapping over SSH)
+Re-run any time and pick `[~] Manage Bitwarden config...` on the
+identity picker to edit anything later.
