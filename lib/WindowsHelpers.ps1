@@ -1,5 +1,13 @@
 # Helpers shared by component windows.ps1 scripts. Dot-sourced into each.
 
+# Logging helpers — components rely on these. Used to live in lib/Driver.ps1
+# which we removed during the Python consolidation; they belong here now since
+# components are the only callers.
+function Write-Log  { Write-Host "==> $args" -ForegroundColor Green }
+function Write-Warn { Write-Host "WARN: $args" -ForegroundColor Yellow }
+function Write-Step { Write-Host "`n--- $args ---" -ForegroundColor Cyan }
+function Write-Die  { Write-Host "ERROR: $args" -ForegroundColor Red; exit 1 }
+
 function Install-Winget {
     param([string]$Id, [string]$Label)
     $installed = & { $ErrorActionPreference = "Continue"; winget list --id $Id --exact --accept-source-agreements 2>$null }
