@@ -362,6 +362,36 @@ def run_create_identity_wizard() -> None:
 _REGISTRY_FILE: Path = Path()
 
 
+def _cleanup_deprecated() -> None:
+    """One-time cleanup of artifacts from removed/replaced components.
+
+    Currently handled:
+      - In-house bitbucket-mcp (replaced by aashari/mcp-server-atlassian-bitbucket
+        invoked via npx). Removes the built artifacts at
+        ~/.local/share/dev-utilities/bitbucket-mcp/{dist,node_modules,package-lock.json}
+        so disk doesn't keep stale junk. The dev-utilities clone itself stays
+        — it may contain other tooling.
+    """
+    if sys.platform == "win32":
+        return  # Windows side never built it
+    bbmcp = Path.home() / ".local" / "share" / "dev-utilities" / "bitbucket-mcp"
+    targets = [bbmcp / "dist", bbmcp / "node_modules", bbmcp / "package-lock.json"]
+    if not any(t.exists() for t in targets):
+        return
+    log("Cleaning up deprecated in-house bitbucket-mcp artifacts...")
+    for t in targets:
+        if not t.exists():
+            continue
+        try:
+            if t.is_dir():
+                shutil.rmtree(t, ignore_errors=True)
+            else:
+                t.unlink(missing_ok=True)
+            log(f"  removed {t}")
+        except Exception as e:
+            warn(f"  failed to remove {t}: {e}")
+
+
 def _ensure_local_bin_on_path() -> None:
     """Add ~/.local/bin to PATH if it exists. Many of the tools we install
     (bw, uv, claude, git-credential-manager) land there, but a non-
@@ -396,6 +426,7 @@ def main() -> int:
 
     _ensure_local_bin_on_path()
     _ensure_tty_stdin()
+    _cleanup_deprecated()
 
     parser = argparse.ArgumentParser(prog="machine-setup")
     parser.add_argument("--reconfigure", "-r", action="store_true",

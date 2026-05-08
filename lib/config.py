@@ -306,14 +306,23 @@ def resolve_components(profile: dict, os_tag: str, override: list[str] | None = 
     """
     explicit = list(override if override is not None else profile["components"])
 
-    # First pass: include everything reachable via depends_on.
+    # First pass: include everything reachable via depends_on. Missing
+    # components (e.g. a deprecated name still in machine.toml) are skipped
+    # with a warning rather than crashing the whole bootstrap.
     in_plan: set[str] = set()
     def collect(comp_name: str, stack: tuple[str, ...] = ()):
         if comp_name in in_plan:
             return
         if comp_name in stack:
             raise ValueError(f"component dep cycle: {' -> '.join(stack + (comp_name,))}")
-        manifest = load_component_manifest(comp_name)
+        try:
+            manifest = load_component_manifest(comp_name)
+        except FileNotFoundError:
+            print(
+                f"  WARN: component '{comp_name}' not found — skipping (stale reference in machine.toml?)",
+                file=sys.stderr,
+            )
+            return
         for dep in manifest["depends_on"]:
             collect(dep, stack + (comp_name,))
         in_plan.add(comp_name)
