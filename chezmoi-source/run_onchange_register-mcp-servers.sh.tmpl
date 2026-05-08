@@ -90,13 +90,11 @@ fi
 if [ "$MS_MCP_JIRA" = "1" ]; then
   # Both server URL and PAT come from BW so the public repo carries no
   # employer-specific data. Add 'jira_url' (e.g. https://jira.your-org.com)
-  # and 'jira_pat' to your "Claude Code MCP Secrets" item. The legacy field
-  # name 'jira_inficon_pat' is honored for backwards compat.
+  # and 'jira_pat' to your "Claude Code MCP Secrets" item.
   jira_url=$(field jira_url)
   jira_pat=$(field jira_pat)
-  [ -z "$jira_pat" ] && jira_pat=$(field jira_inficon_pat)
   if [ -z "$jira_pat" ]; then
-    echo "register-mcp-servers: jira_pat (or jira_inficon_pat) missing in BW -- skipping jira" >&2
+    echo "register-mcp-servers: jira_pat missing in BW -- skipping jira" >&2
   elif [ -z "$jira_url" ]; then
     echo "register-mcp-servers: jira_url missing in BW -- skipping jira" >&2
   else

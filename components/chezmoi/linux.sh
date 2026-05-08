@@ -54,3 +54,16 @@ if [ -n "$_reset_key" ]; then
 fi
 chezmoi apply --source "$_source" --force \
   || warn "chezmoi apply had errors — config may be partially applied"
+
+# Pull ~/.claude/CLAUDE.md from the BW item "Claude Code Global Config"
+# (notes field). Bitwarden is the source of truth for personal global
+# Claude Code instructions, so the public repo carries no personal text.
+# Skipped silently if BW is unavailable / item missing.
+if command -v bw >/dev/null 2>&1 && [ -n "${BW_SESSION:-}" ]; then
+  _notes=$(bw get notes "Claude Code Global Config" 2>/dev/null || true)
+  if [ -n "$_notes" ]; then
+    mkdir -p "$HOME/.claude"
+    printf '%s\n' "$_notes" > "$HOME/.claude/CLAUDE.md"
+    log "Wrote ~/.claude/CLAUDE.md from Bitwarden (Claude Code Global Config)"
+  fi
+fi

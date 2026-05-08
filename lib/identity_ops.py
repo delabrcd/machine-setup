@@ -266,6 +266,44 @@ def write_mcp_secrets(values: dict[str, str]) -> bool:
         return bw.encode_and_create(template) is not None
 
 
+# ── Claude Code global config (CLAUDE.md content) ──────────────────────────
+#
+# Stored as the BW item's free-form `notes` field (which is naturally
+# multi-line). The chezmoi component reads this back at apply time and
+# writes ~/.claude/CLAUDE.md so Bitwarden is the source of truth for
+# personal global instructions.
+
+CLAUDE_CONFIG_ITEM = "Claude Code Global Config"
+
+
+def read_claude_md() -> str:
+    """Return the notes field of the global-config item, or '' if missing."""
+    item = bw.get_item_exact(CLAUDE_CONFIG_ITEM)
+    if not item:
+        return ""
+    return (item.get("notes") or "")
+
+
+def write_claude_md(content: str) -> bool:
+    """Create-or-update the global-config item with `content` in its notes
+    field. Returns True on success."""
+    existing = bw.get_item_exact(CLAUDE_CONFIG_ITEM)
+    if existing:
+        _log(f"Updating BW item: {CLAUDE_CONFIG_ITEM}")
+        existing["notes"] = content
+        return bw.encode_and_edit(existing["id"], existing)
+    else:
+        _log(f"Creating BW item: {CLAUDE_CONFIG_ITEM}")
+        template = _bw_template_item()
+        template.update({
+            "type":       2,
+            "name":       CLAUDE_CONFIG_ITEM,
+            "secureNote": {"type": 0},
+            "notes":      content,
+        })
+        return bw.encode_and_create(template) is not None
+
+
 # ── SSH key import (existing key into a Machine Identity item) ──────────────
 
 def import_ssh_key_text(name: str, private_key: str, public_key: str) -> bool:

@@ -88,12 +88,11 @@ if ($msBitbucket -eq "1") {
 if ($msJira -eq "1") {
     # Both server URL and PAT live in BW so nothing employer-specific is in
     # the public repo. BW fields: jira_url (e.g. https://jira.your-org.com)
-    # + jira_pat. Legacy 'jira_inficon_pat' field is honored too.
+    # + jira_pat.
     $jiraUrl = $fields["jira_url"]
     $jiraPat = $fields["jira_pat"]
-    if (-not $jiraPat) { $jiraPat = $fields["jira_inficon_pat"] }
     if (-not $jiraPat) {
-        Write-Warning "register-mcp-servers: jira_pat (or jira_inficon_pat) missing -- skipping jira"
+        Write-Warning "register-mcp-servers: jira_pat missing -- skipping jira"
     } elseif (-not $jiraUrl) {
         Write-Warning "register-mcp-servers: jira_url missing in BW -- skipping jira"
     } else {

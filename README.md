@@ -151,7 +151,12 @@ right after BW unlock. Walk through:
 3. **Manage MCP secrets** — single form for `context7_api_key`,
    `bitbucket_email` / `bitbucket_api_token` / `bitbucket_workspace`,
    `jira_url` / `jira_pat`. Hidden fields stored as `type: 1`.
-4. **Done** — back to the identity picker.
+4. **Edit Claude Code global instructions** — multi-line editor for the
+   contents of `~/.claude/CLAUDE.md`. Stored in the `notes` field of a
+   BW item named `Claude Code Global Config`; the chezmoi component
+   writes the file out at apply time, so Bitwarden is the source of
+   truth and the public repo carries no personal text.
+5. **Done** — back to the identity picker.
 
 ### Editing later
 
@@ -197,6 +202,12 @@ The chezmoi `run_onchange_register-mcp-servers` template reads these at
 chezmoi-apply time (runtime `bw get item`, never inlined into rendered
 files) and emits `claude mcp add` calls — gated on which `mcp-*`
 components you picked in the bootstrap.
+
+**Claude Code Global Config item** — single BW item, `notes` field
+holds the contents of `~/.claude/CLAUDE.md` (your global Claude Code
+instructions). The chezmoi component fetches the notes via `bw get
+notes "Claude Code Global Config"` after `chezmoi apply` and writes
+the file out. Edit it from the BW config manager.
 
 ### Power-user CLI alternative
 

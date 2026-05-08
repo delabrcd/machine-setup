@@ -28,3 +28,17 @@ Write-Log "MCP flags for chezmoi: context7=$env:MS_MCP_CONTEXT7 bitbucket=$env:M
 
 Write-Log "Applying chezmoi from local source: $source"
 chezmoi apply --source $source --force
+
+# Pull ~/.claude/CLAUDE.md from the BW item "Claude Code Global Config"
+# (notes field). Bitwarden is the source of truth for personal global
+# Claude Code instructions; the public repo carries no personal text.
+# Skipped silently if BW is unavailable / item missing.
+if ((Get-Command bw -ErrorAction SilentlyContinue) -and $env:BW_SESSION) {
+    $notes = & { $ErrorActionPreference = "Continue"; bw get notes "Claude Code Global Config" 2>$null }
+    if ($notes) {
+        $claudeDir = Join-Path $env:USERPROFILE ".claude"
+        if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null }
+        Set-Content -Path (Join-Path $claudeDir "CLAUDE.md") -Value $notes -Encoding UTF8
+        Write-Log "Wrote ~/.claude/CLAUDE.md from Bitwarden (Claude Code Global Config)"
+    }
+}

@@ -66,7 +66,9 @@ bootstrap's BW config manager handles it. On a fresh vault:
 4. Click "Create new identity" — fill in name, email, host, helper,
    then choose Generate / Import-from-files / Paste for the SSH key.
 5. Click "Manage MCP secrets" — fill in API keys + URLs.
-6. Click "Done".
+6. Click "Edit Claude Code global instructions" — paste/edit the
+   contents of `~/.claude/CLAUDE.md` (stored in BW notes field).
+7. Click "Done".
 7. Bootstrap continues with the picker, MCPs, plan execution.
 
 Re-run any time and pick `[~] Manage Bitwarden config...` on the

@@ -22,7 +22,7 @@ from textual.containers import VerticalScroll, Vertical, Center
 from textual.screen import Screen
 from textual.widgets import (
     Footer, Header, Input, ProgressBar, RadioButton, RadioSet,
-    RichLog, SelectionList, Static,
+    RichLog, SelectionList, Static, TextArea,
 )
 from textual.widgets.selection_list import Selection
 
@@ -755,6 +755,16 @@ class BwManagerScreen(Screen):
                 yield Static("  (could not read)", classes="hint")
             yield Button("Manage MCP secrets", id="btn-mcp", variant="primary")
 
+            # Claude Code global instructions (CLAUDE.md content in BW notes).
+            yield Static("\n[bold]Claude Code global instructions[/]", classes="section-title")
+            try:
+                _md = identity_ops.read_claude_md()
+                _state = f"  {len(_md)} chars stored" if _md else "  (empty)"
+            except Exception:
+                _state = "  (could not read)"
+            yield Static(_state, classes="hint")
+            yield Button("Edit Claude Code global instructions", id="btn-claude-md", variant="primary")
+
             yield Static("")
             yield Button("Done — back to picker", id="btn-done")
         yield Footer()
@@ -767,6 +777,8 @@ class BwManagerScreen(Screen):
             self.app.push_screen(IdentityFormScreen(mode="edit", name=event.button.name))
         elif bid == "btn-mcp":
             self.app.push_screen(McpSecretsFormScreen())
+        elif bid == "btn-claude-md":
+            self.app.push_screen(ClaudeConfigEditorScreen())
         elif bid == "btn-done":
             self.app.pop_screen()
 
@@ -1072,6 +1084,72 @@ class McpSecretsFormScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-mcp-save":
+            self.action_save()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
+class ClaudeConfigEditorScreen(Screen):
+    """Edit the Claude Code Global Config BW item's notes field, which holds
+    the contents of ~/.claude/CLAUDE.md. Bitwarden is the source of truth;
+    the chezmoi component writes the file back out at apply time."""
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save"),
+        Binding("escape", "back", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with VerticalScroll():
+            yield Static("Claude Code global instructions", classes="step")
+            yield Static(
+                "Contents of ~/.claude/CLAUDE.md. Stored in Bitwarden as the\n"
+                "notes field of 'Claude Code Global Config'. Ctrl+S to save,\n"
+                "Esc to cancel.",
+                classes="hint",
+            )
+            yield TextArea(id="claude-md-area", show_line_numbers=False)
+            yield Static(id="claude-md-status", classes="status")
+            yield Button("Save (Ctrl+S)", id="btn-claude-md-save", variant="primary")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#claude-md-status", Static).update("Loading from Bitwarden...")
+        self.run_worker(self._do_load(), thread=True, exclusive=True)
+
+    async def _do_load(self) -> None:
+        content = ""
+        try:
+            content = identity_ops.read_claude_md()
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#claude-md-status", Static).update,
+                f"[red]load failed: {e}[/]",
+            )
+            return
+        ta = self.query_one("#claude-md-area", TextArea)
+        self.app.call_from_thread(ta.load_text, content)
+        self.app.call_from_thread(self.query_one("#claude-md-status", Static).update, "")
+        self.app.call_from_thread(ta.focus)
+
+    def action_save(self) -> None:
+        ta = self.query_one("#claude-md-area", TextArea)
+        content = ta.text
+        self.query_one("#claude-md-status", Static).update("Writing to Bitwarden...")
+        self.run_worker(self._do_save(content), thread=True, exclusive=True)
+
+    async def _do_save(self, content: str) -> None:
+        ok = identity_ops.write_claude_md(content)
+        status = self.query_one("#claude-md-status", Static)
+        if ok:
+            self.app.call_from_thread(status.update, "[green]saved[/]")
+            self.app.call_from_thread(self.app.pop_screen)
+        else:
+            self.app.call_from_thread(status.update, "[red]save failed — see terminal log[/]")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-claude-md-save":
             self.action_save()
 
     def action_back(self) -> None:
