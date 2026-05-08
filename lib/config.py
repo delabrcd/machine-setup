@@ -280,40 +280,77 @@ def load_component_manifest(name: str) -> dict:
     data.setdefault("name", name)
     data.setdefault("supported", [])
     data.setdefault("depends_on", [])
+    # Soft ordering: if BOTH are in the plan, this component runs after the
+    # listed ones. Doesn't pull them in transitively. Use for components
+    # whose runtime configuration (e.g. chezmoi MCP registration) depends on
+    # outputs of an optional sibling.
+    data.setdefault("runs_after", [])
     data.setdefault("per_identity", False)
     return data
 
 
 def resolve_components(profile: dict, os_tag: str, override: list[str] | None = None) -> list[dict]:
-    """Topo-sort components, pulling in transitive deps.
+    """Topo-sort components, pulling in transitive `depends_on` deps and
+    honoring `runs_after` soft-ordering when both ends are in the plan.
 
     os_tag is one of: linux-ubuntu, linux-fedora, linux-arch, windows, wsl, macos.
     Components whose `supported` list omits os_tag are skipped silently — that's
     how a single profile works on multiple OSes (e.g. uv on Linux only).
 
     If `override` is given, it replaces the profile's components list entirely
-    (deps are still pulled in transitively). This is the picker's escape hatch.
+    (deps are still pulled in transitively).
     """
     explicit = list(override if override is not None else profile["components"])
-    visited: set[str] = set()
-    order: list[str] = []
 
-    def visit(comp_name: str, stack: tuple[str, ...] = ()):
-        if comp_name in visited:
+    # First pass: include everything reachable via depends_on.
+    in_plan: set[str] = set()
+    def collect(comp_name: str, stack: tuple[str, ...] = ()):
+        if comp_name in in_plan:
             return
         if comp_name in stack:
             raise ValueError(f"component dep cycle: {' -> '.join(stack + (comp_name,))}")
         manifest = load_component_manifest(comp_name)
         for dep in manifest["depends_on"]:
-            visit(dep, stack + (comp_name,))
-        visited.add(comp_name)
-        order.append(comp_name)
-
+            collect(dep, stack + (comp_name,))
+        in_plan.add(comp_name)
     for c in explicit:
-        visit(c)
+        collect(c)
+
+    # Second pass: build the dependency graph. depends_on always adds an edge.
+    # runs_after adds an edge only if BOTH endpoints are in_plan (soft order).
+    edges: dict[str, set[str]] = {n: set() for n in in_plan}  # name -> set of preds
+    for n in in_plan:
+        m = load_component_manifest(n)
+        for dep in m["depends_on"]:
+            if dep in in_plan:
+                edges[n].add(dep)
+        for soft in m.get("runs_after") or []:
+            if soft in in_plan:
+                edges[n].add(soft)
+
+    # Kahn's algorithm — ordered visitation so output is stable.
+    out_order: list[str] = []
+    no_pred = sorted([n for n, p in edges.items() if not p])
+    pred_of = {n: set(p) for n, p in edges.items()}
+    succ_of: dict[str, set[str]] = {n: set() for n in in_plan}
+    for n, preds in edges.items():
+        for p in preds:
+            succ_of[p].add(n)
+    while no_pred:
+        n = no_pred.pop(0)
+        out_order.append(n)
+        for s in sorted(succ_of[n]):
+            pred_of[s].discard(n)
+            if not pred_of[s]:
+                no_pred.append(s)
+                no_pred.sort()
+    if len(out_order) != len(in_plan):
+        # Some cycle escaped the depends_on check (likely runs_after vs depends_on contradiction)
+        leftover = [n for n in in_plan if n not in out_order]
+        raise ValueError(f"runs_after/depends_on cycle involving: {leftover}")
 
     out = []
-    for c in order:
+    for c in out_order:
         m = load_component_manifest(c)
         if os_tag not in m["supported"]:
             continue

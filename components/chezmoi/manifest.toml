@@ -1,12 +1,16 @@
 name = "chezmoi"
-description = "chezmoi-managed dotfiles (Claude Code config, MCP server registration, etc.)"
+description = "chezmoi-managed dotfiles (Claude Code config, MCP server registration)"
 supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl", "windows"]
 # chezmoi clones a (typically GitHub-hosted) dotfiles repo, so SSH key + git
-# identity must already be set up. Some chezmoi-managed scripts register MCP
-# servers via `uvx`, hence the uv dep. claude-code is technically optional —
-# the dotfiles only configure it if it's installed — but listing it here keeps
-# the install order sensible (claude-code -> chezmoi).
+# identity must already be set up. Its run_onchange_register-mcp-servers script
+# wires up the context7, jira (uvx), and bitbucket MCP servers, so it needs
+# claude-code present and uv installed.
 depends_on = ["claude-code", "uv", "ssh-key", "credential-helpers", "git-identity"]
+# Soft ordering: when these are ALSO in the plan, run chezmoi after them so
+# its MCP-register script can point at the freshly-built bitbucket-mcp binary
+# and the cloned dev-utilities tree. Not transitive — picking chezmoi alone
+# doesn't pull these in.
+runs_after = ["bitbucket-mcp", "dev-utilities"]
 per_identity = false
 
 # The driver makes profile-level [component_config.chezmoi] available to the
