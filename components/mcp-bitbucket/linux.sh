@@ -51,23 +51,24 @@ fi
 # Re-sync so any BW field changes since unlock are visible.
 bw sync >/dev/null 2>&1 || warn "bw sync failed; reading possibly-stale cache"
 
-# Pull all candidate fields from the BW item in one go
+# Pull all candidate fields from the BW item in one go.
+# Note: program is passed via -c; field names go through sys.argv. The naive
+# `python3 - args <<'PY'` pattern would put the heredoc on stdin, hiding the
+# piped-in BW JSON, so json.load(sys.stdin) would silently fail.
 fields_blob=$(bw_item_json_exact "$bw_item" 2>/dev/null \
-  | python3 - "$email_field" "$user_field" "$token_field" "$password_field" "$ws_field" <<'PY'
+  | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-fs = {f.get('name'): f.get('value') for f in (d.get('fields') or [])}
+fs = {f.get("name"): f.get("value") for f in (d.get("fields") or [])}
 e_f, u_f, t_f, p_f, w_f = sys.argv[1:6]
-out = [
-    fs.get(e_f, '') or '',  # email
-    fs.get(u_f, '') or '',  # username
-    fs.get(t_f, '') or '',  # api token
-    fs.get(p_f, '') or '',  # app password
-    fs.get(w_f, '') or '',  # workspace
-]
-print('\t'.join(out))
-PY
-)
+print("\t".join([
+    fs.get(e_f, "") or "",
+    fs.get(u_f, "") or "",
+    fs.get(t_f, "") or "",
+    fs.get(p_f, "") or "",
+    fs.get(w_f, "") or "",
+]))
+' "$email_field" "$user_field" "$token_field" "$password_field" "$ws_field")
 IFS=$'\t' read -r email username token app_pw workspace_bw <<< "$fields_blob"
 workspace="${workspace_cfg:-$workspace_bw}"
 
