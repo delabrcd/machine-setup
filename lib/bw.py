@@ -245,7 +245,11 @@ def sync() -> None:
     if not have_bw():
         return
     _log("Syncing Bitwarden vault...")
-    subprocess.call(["bw", "sync"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.run(["bw", "sync"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Surface the failure rather than swallowing it — a silent sync error
+        # leads to "I added the field but the bootstrap can't see it" mysteries.
+        _warn(f"bw sync failed (rc={proc.returncode}): {(proc.stderr or proc.stdout).strip()}")
 
 
 def list_items() -> list[dict]:

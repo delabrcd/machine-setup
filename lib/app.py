@@ -801,6 +801,12 @@ class BootstrapApp(App):
 
     def advance_to_run(self) -> None:
         """Persist machine.toml + start the in-TUI plan run."""
+        # Sync BW one more time before plan execution so any item-field
+        # changes you made between entering the password and confirming the
+        # last picker are visible to component scripts (e.g. mcp-bitbucket
+        # reading new BW fields).
+        if bw.is_unlocked():
+            bw.sync()
         # Persist state before running so the user keeps their selections
         # even if a component fails / they kill the run.
         try:

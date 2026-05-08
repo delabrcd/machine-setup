@@ -24,6 +24,8 @@ if ! check_bw_session 2>/dev/null; then
   return 1
 fi
 
+bw sync >/dev/null 2>&1 || warn "bw sync failed; reading possibly-stale cache"
+
 api_key=$(bw_item_json_exact "$bw_item" 2>/dev/null \
   | python3 -c "
 import sys, json

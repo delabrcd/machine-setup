@@ -48,6 +48,9 @@ if ! check_bw_session 2>/dev/null; then
   return 1
 fi
 
+# Re-sync so any BW field changes since unlock are visible.
+bw sync >/dev/null 2>&1 || warn "bw sync failed; reading possibly-stale cache"
+
 # Pull all candidate fields from the BW item in one go
 fields_blob=$(bw_item_json_exact "$bw_item" 2>/dev/null \
   | python3 - "$email_field" "$user_field" "$token_field" "$password_field" "$ws_field" <<'PY'
