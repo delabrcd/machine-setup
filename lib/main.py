@@ -154,13 +154,13 @@ def pick_identities(state: dict, force: bool, quiet: bool) -> None:
         state["identities"] = [n for n in os.environ["MACHINE_SETUP_IDENTITIES"].split(",") if n]
         log(f"Using identities from MACHINE_SETUP_IDENTITIES: {','.join(state['identities'])}")
         return
-    if state.get("identities") and not force:
-        log(f"Using saved identities: {','.join(state['identities'])}")
-        return
     if quiet:
         log("Quiet mode: keeping saved identities.")
         return
 
+    # Always show the picker — saved values pre-checked. User confirms with ENTER
+    # to keep, or toggles to change. force is now redundant but kept for symmetry.
+    _ = force
     while True:
         # available list = identities discovered + any TOML fallbacks. We use
         # config.list_known_identities which already merges them.
@@ -241,13 +241,12 @@ def pick_components(state: dict, os_tag: str, force: bool, quiet: bool) -> None:
         state["extra_components"] = [c for c in os.environ["MACHINE_SETUP_COMPONENTS"].split(",") if c]
         log(f"Using extra components from MACHINE_SETUP_COMPONENTS")
         return
-    if state.get("extra_components") and not force:
-        log(f"Using saved extra components: {','.join(state['extra_components'])}")
-        return
     if quiet:
         log("Quiet mode: keeping saved extra components.")
         return
 
+    # Always show — saved values pre-checked. force kept for symmetry.
+    _ = force
     required = config._required_components(state.get("identities") or [], os_tag)
     available = []
     for c in config.list_all_components():

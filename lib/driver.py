@@ -109,7 +109,6 @@ def _run_script(script_path: str, extra_env: dict | None = None) -> int:
     env = {**os.environ, **extra_env}
 
     if script_path.endswith(".ps1"):
-        # Find pwsh or powershell
         from shutil import which
         ps = which("pwsh") or which("powershell")
         if not ps:
@@ -117,7 +116,14 @@ def _run_script(script_path: str, extra_env: dict | None = None) -> int:
             return 1
         cmd = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
     else:
-        cmd = ["bash", script_path]
+        # Source lib/common.sh in the same shell so component scripts can use
+        # `log`, `warn`, `step`, ensure_path, BW helpers, etc. without each
+        # having to add boilerplate at the top.
+        common = Path(env.get("MACHINE_SETUP_DIR", "")) / "lib" / "common.sh"
+        cmd = [
+            "bash", "-c",
+            f". {shlex.quote(str(common))}; . {shlex.quote(script_path)}"
+        ]
 
     return subprocess.call(cmd, env=env)
 
