@@ -25,10 +25,16 @@ _basename="$IDENT_SSH_KEY_BASENAME"
 _pub="$HOME/.ssh/${_basename}.pub"
 _priv_phantom="$HOME/.ssh/${_basename}"  # never actually written; just the path ssh-config points at
 
-# Ensure ssh-agent
-if [ -z "${SSH_AUTH_SOCK:-}" ] || ! ssh-add -l >/dev/null 2>&1; then
+# Ensure ssh-agent. Only spawn a new one when the existing socket is truly
+# unreachable (ssh-add -l rc=2). rc=1 just means "agent has no identities" —
+# loading into that agent (e.g. systemd's /run/user/$UID/ssh-agent.socket)
+# is exactly what we want, since those keys then persist across every shell
+# in the user session instead of dying with this subprocess.
+ssh-add -l >/dev/null 2>&1; _agent_rc=$?
+if [ -z "${SSH_AUTH_SOCK:-}" ] || [ "$_agent_rc" -eq 2 ]; then
   eval "$(ssh-agent -s)" >/dev/null
 fi
+unset _agent_rc
 
 _load_from_bw() {
   log "Loading SSH key from BW: $IDENT_BW_SSH_ITEM"

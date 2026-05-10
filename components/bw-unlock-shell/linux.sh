@@ -60,8 +60,13 @@ log "Wrote ~/.local/bin/bw-ssh-add"
 # survives in the user's interactive shell.
 _snippet='
 # machine-setup: unlock Bitwarden vault and load every configured SSH key.
+# Only spawn a new ssh-agent if the existing socket is unreachable (rc=2);
+# rc=1 means "no identities yet" — loading into that agent (typically the
+# systemd one at /run/user/$UID/ssh-agent.socket) keeps keys available in
+# every shell of the user session until logout / agent restart.
 bw-unlock() {
-  if [ -z "${SSH_AUTH_SOCK:-}" ] || ! ssh-add -l >/dev/null 2>&1; then
+  ssh-add -l >/dev/null 2>&1; local _rc=$?
+  if [ -z "${SSH_AUTH_SOCK:-}" ] || [ "$_rc" -eq 2 ]; then
     eval "$(ssh-agent -s)" >/dev/null
   fi
   export BW_SESSION="$(bw unlock --raw)"
