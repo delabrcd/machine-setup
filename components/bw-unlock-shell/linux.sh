@@ -34,26 +34,52 @@ if [ "\${_rc:-0}" -eq 2 ]; then
   exit 1
 fi
 
-_load_bw_key() {
-  local item="\$1" priv
-  priv=\$(bw list items --search "\$item" 2>/dev/null | python3 -c "
+# Per-item \`bw get item\` uses the local cached vault and (unlike a bare
+# \`bw list items\`) does not force a full server sync — which tends to hang
+# on bw 2026.x when the session is in the post-login broken state. We also
+# avoid \`--search\` (tokenizes on whitespace/':' and can miss names) and
+# any \`bw status\` gating (bitwarden/clients#6705: status lies about lock
+# state). --nointeraction makes bw fail loudly; stderr is left attached
+# to the terminal so any prompt/error is visible.
+TARGETS=( $_items)
+for _name in "\${TARGETS[@]}"; do
+  echo "Fetching: \$_name" >&2
+  if ! _item_json=\$(timeout --kill-after=5 30 bw --nointeraction get item "\$_name"); then
+    echo "Skipped (bw get item failed): \$_name" >&2
+    continue
+  fi
+  # Note: \$() strips trailing newlines from the captured value, but SSH
+  # keys require a trailing newline. We always re-append one via \`printf %s\n\`.
+  _priv=\$(printf '%s' "\$_item_json" | python3 -c '
 import sys, json
-items = json.load(sys.stdin)
-match = next((i for i in items if i.get('name') == sys.argv[1]), None)
-if match is None: sys.exit(2)
-priv = next((f['value'] for f in (match.get('fields') or []) if f.get('name') == 'private_key'), None)
-if priv is None: sys.exit(3)
+data = json.load(sys.stdin)
+priv = next((f["value"] for f in (data.get("fields") or []) if f.get("name") == "private_key"), None)
+if priv is None: sys.exit(2)
 sys.stdout.write(priv)
-" "\$item" 2>/dev/null) || { echo "Skipped (not found): \$item"; return; }
-  printf '%s\n' "\$priv" | ssh-add - 2>/dev/null && echo "Loaded: \$item" || echo "ssh-add failed for: \$item"
-}
-
-for item in $_items; do _load_bw_key "\$item"; done
+') || { echo "Skipped (no private_key field): \$_name" >&2; continue; }
+  _ssh_err=\$(printf '%s\n' "\$_priv" | ssh-add - 2>&1) \\
+    && echo "Loaded: \$_name" \\
+    || { echo "ssh-add failed for: \$_name" >&2
+         printf '  %s\n' "\$_ssh_err" | head -5 >&2; }
+done
 
 echo "ssh-agent has \$(ssh-add -l | wc -l) key(s)."
 EOF
 chmod +x "$HOME/.local/bin/bw-ssh-add"
 log "Wrote ~/.local/bin/bw-ssh-add"
+
+# Probe item name baked into the snippet at install time. It's used to
+# verify the bw session can actually decrypt items (bw 2026.x sometimes
+# hands back sessions that cannot — bw#18455). We use the *first* configured
+# identity since we know it exists; failure to fetch it means the session
+# is broken regardless of which identity we picked.
+_first_item=$(printf '%s' "$PLAN_JSON" | python3 -c "
+import sys, json, shlex
+data = json.load(sys.stdin)
+items = [i.get('bw_ssh_item','') for i in data.get('identities', []) if i.get('bw_ssh_item')]
+# Emit a shell-quoted literal so the snippet can safely embed any name.
+print(shlex.quote(items[0]) if items else \"''\")
+")
 
 # Shell rc snippet: bw-unlock function. The agent MUST be started in the
 # parent shell, not in bw-ssh-add (a child process), so SSH_AUTH_SOCK
@@ -64,15 +90,54 @@ _snippet='
 # rc=1 means "no identities yet" — loading into that agent (typically the
 # systemd one at /run/user/$UID/ssh-agent.socket) keeps keys available in
 # every shell of the user session until logout / agent restart.
+#
+# Resilience notes (bitwarden/clients#18455 + #6705):
+#   * Some bw CLI builds return a session from `bw unlock` that cannot
+#     decrypt vault items. We probe by fetching a known item; if the
+#     probe fails we automatically fall back to `bw logout && bw login`,
+#     which produces a session that works. The single password prompt
+#     captured at the top covers both attempts (passed via --passwordenv).
+#   * `bw status` lies about lock state on these builds, so we never use
+#     it as a verification mechanism.
 bw-unlock() {
   ssh-add -l >/dev/null 2>&1; local _rc=$?
   if [ -z "${SSH_AUTH_SOCK:-}" ] || [ "$_rc" -eq 2 ]; then
     eval "$(ssh-agent -s)" >/dev/null
   fi
-  export BW_SESSION="$(bw unlock --raw)"
+  local _email _pw _sess
+  local _probe=__BW_UNLOCK_PROBE__
+  _email=$(bw status 2>/dev/null \
+    | python3 -c "import sys,json;print(json.load(sys.stdin).get(\"userEmail\",\"\"))" \
+    2>/dev/null) || _email=
+  printf "Master password: " >&2
+  read -rs _pw
+  printf "\n" >&2
+  # Fast path: bw lock + bw unlock (uses local cached vault, no network).
+  bw lock >/dev/null 2>&1 || true
+  _sess=$(BW_PASSWORD="$_pw" bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null) || _sess=
+  if [ -n "$_sess" ] && [ -n "$_probe" ] \
+     && BW_SESSION="$_sess" bw --nointeraction get item "$_probe" >/dev/null 2>&1; then
+    : # fast path worked
+  else
+    echo "bw unlock session is broken (bw#18455). Falling back to bw login..." >&2
+    if [ -z "$_email" ]; then
+      echo "Cannot determine login email for fallback. Run \"bw login\" manually." >&2
+      unset _pw; return 1
+    fi
+    bw logout >/dev/null 2>&1 || true
+    _sess=$(BW_PASSWORD="$_pw" bw login --passwordenv BW_PASSWORD --raw "$_email" 2>/dev/null) || _sess=
+  fi
+  unset _pw
+  if [ -z "$_sess" ]; then
+    echo "Could not obtain a bw session — wrong password?" >&2
+    return 1
+  fi
+  export BW_SESSION="$_sess"
   bw-ssh-add
 }
 '
+# Substitute the install-time probe item name into the snippet.
+_snippet=${_snippet//__BW_UNLOCK_PROBE__/$_first_item}
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   [ -f "$rc" ] || continue
   if grep -q '# machine-setup: unlock Bitwarden' "$rc"; then
