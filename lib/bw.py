@@ -175,12 +175,40 @@ def status() -> dict:
     if not have_bw():
         return {}
     try:
-        result = subprocess.run(["bw", "status"], capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            ["bw", "status"], capture_output=True, text=True, check=False, timeout=10
+        )
         if result.returncode != 0 or not result.stdout.strip():
             return {}
         return json.loads(result.stdout)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
         return {}
+
+
+def _probe_session(timeout: int = 30) -> bool:
+    """Verify that BW_SESSION can actually decrypt vault items.
+
+    Mirrors the shell-side probe added in bw-unlock-shell: bw 2026.x
+    (bitwarden/clients#18455) sometimes returns sessions from `bw unlock`
+    that the server accepts but cannot decrypt items with, and `bw status`
+    lies about lock state (#6705) — so the only reliable signal is to run
+    the operation we'd run downstream anyway.
+    """
+    if not os.environ.get("BW_SESSION"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["bw", "--nointeraction", "list", "items"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return False
+    try:
+        return isinstance(json.loads(proc.stdout), list)
+    except json.JSONDecodeError:
+        return False
 
 
 def is_unlocked() -> bool:
@@ -191,30 +219,40 @@ def is_unlocked() -> bool:
 
 
 def unlock(password_prompt: str = "Bitwarden master password") -> bool:
-    """Make sure the vault is unlocked. Returns True on success.
+    """Make sure the vault is unlocked AND can decrypt items. Returns True
+    on success.
 
     Order of attempts:
-      1. existing BW_SESSION (verified via status)
+      1. existing BW_SESSION (verified by probing `bw list items`, NOT by
+         trusting `bw status` — see bw#6705)
       2. login (if vault is unauthenticated)
-      3. unlock with BW_PASSWORD env, else interactive prompt
+      3. `bw lock` + `bw unlock` (fast path; uses local cached vault)
+      4. `bw logout` + `bw login` (slow path; works around bw#18455 where
+         `bw unlock` returns a broken session)
     On success, BW_SESSION is set in os.environ.
     """
     if not have_bw():
         _warn("bw CLI not installed; skipping vault unlock")
         return False
 
-    if is_unlocked():
+    if os.environ.get("BW_SESSION") and _probe_session():
         _log("Bitwarden session already active.")
         sync()
         return True
 
+    # Capture the login email up front. We need it for the bw#18455 fallback
+    # (`bw login --raw <email>`), and we have to read it BEFORE `bw logout`
+    # wipes the local state.
     st = status()
+    email = st.get("userEmail") or ""
+
     if st.get("status") == "unauthenticated":
         _log("Logging in to Bitwarden...")
         rc = subprocess.call(["bw", "login"])
         if rc != 0:
             _warn("Bitwarden login failed")
             return False
+        email = status().get("userEmail") or email
 
     pw = os.environ.get("BW_PASSWORD")
     if not pw:
@@ -227,15 +265,50 @@ def unlock(password_prompt: str = "Bitwarden master password") -> bool:
         _warn("No password supplied")
         return False
 
+    # --- Fast path: bw lock + bw unlock (local cached vault, no network). ---
+    # The `bw lock` clears any stale/broken session so the unlock starts fresh.
+    subprocess.run(["bw", "lock"], capture_output=True, text=True)
     proc = subprocess.run(
         ["bw", "unlock", "--passwordenv", "_BW_PWD_TMP", "--raw"],
         capture_output=True, text=True,
         env={**os.environ, "_BW_PWD_TMP": pw},
     )
+    sess = proc.stdout.strip() if proc.returncode == 0 else ""
+    if sess:
+        os.environ["BW_SESSION"] = sess
+        if _probe_session():
+            sync()
+            return True
+
+    # Fast path didn't yield a usable session. This is almost always bw#18455
+    # — NOT a wrong password — so the status message should not imply user
+    # error. The fallback covers the actual wrong-password case at the end.
+    _log("Working around bw#18455 (bw unlock session unusable); "
+         "retrying via bw login (this can take a few seconds)...")
+
+    # --- Fallback: bw logout + bw login produces a session that works. ---
+    if not email:
+        _warn("Cannot determine login email for bw login fallback — "
+              "run `bw login` manually, then re-run setup.")
+        return False
+    subprocess.run(["bw", "logout"], capture_output=True, text=True)
+    os.environ.pop("BW_SESSION", None)
+    fb_env = {**os.environ, "_BW_PWD_TMP": pw}
+    fb_env.pop("BW_SESSION", None)
+    proc = subprocess.run(
+        ["bw", "login", "--passwordenv", "_BW_PWD_TMP", "--raw", email],
+        capture_output=True, text=True, env=fb_env,
+    )
     if proc.returncode != 0 or not proc.stdout.strip():
-        _warn("Bitwarden unlock failed")
+        # At this point both `bw unlock` AND `bw login` rejected the password,
+        # so it really is wrong (or 2FA is in play). Surface that clearly.
+        _warn("Could not obtain a Bitwarden session — wrong password "
+              "(or 2FA required)?")
         return False
     os.environ["BW_SESSION"] = proc.stdout.strip()
+    if not _probe_session():
+        _warn("Even bw login produced an unusable session — giving up.")
+        return False
     sync()
     return True
 
@@ -245,7 +318,16 @@ def sync() -> None:
     if not have_bw():
         return
     _log("Syncing Bitwarden vault...")
-    proc = subprocess.run(["bw", "sync"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["bw", "sync"], capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        # bw#18455: a broken session can make `bw sync` hang. Don't block the
+        # whole installer on it — discovery may still work against the locally
+        # cached vault.
+        _warn("bw sync timed out — continuing without sync.")
+        return
     if proc.returncode != 0:
         # Surface the failure rather than swallowing it — a silent sync error
         # leads to "I added the field but the bootstrap can't see it" mysteries.
@@ -256,7 +338,14 @@ def list_items() -> list[dict]:
     """All vault items as parsed JSON list. Returns [] on any failure."""
     if not is_unlocked():
         return []
-    proc = subprocess.run(["bw", "list", "items"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["bw", "list", "items"], capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        _warn("bw list items timed out — vault session may be broken "
+              "(bw#18455). Try restarting the installer.")
+        return []
     if proc.returncode != 0 or not proc.stdout.strip():
         return []
     try:
