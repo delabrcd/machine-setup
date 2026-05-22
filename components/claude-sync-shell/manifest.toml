@@ -1,0 +1,5 @@
+name = "claude-sync-shell"
+description = "Install claude-sync shell function (pulls/pushes ~/.claude/ as a Bitwarden attachment)."
+supported = ["linux-ubuntu", "linux-fedora", "linux-arch", "wsl"]
+depends_on = ["bw-cli", "claude-code"]
+per_identity = false

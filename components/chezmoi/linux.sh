@@ -55,15 +55,30 @@ fi
 chezmoi apply --source "$_source" --force \
   || warn "chezmoi apply had errors — config may be partially applied"
 
-# Pull ~/.claude/CLAUDE.md from the BW item "Claude Code Global Config"
-# (notes field). Bitwarden is the source of truth for personal global
-# Claude Code instructions, so the public repo carries no personal text.
-# Skipped silently if BW is unavailable / item missing.
+# Legacy: pull ~/.claude/CLAUDE.md from the BW item "Claude Code Global
+# Config" (notes field). Superseded by the claude-sync-shell component,
+# which packs the whole ~/.claude/ subset (including CLAUDE.md) into a
+# single BW attachment ("Claude Code Config Bundle"). If that bundle item
+# exists in the vault, skip this fetch so the two paths don't compete.
+# Otherwise fall back to the legacy item for backwards compat.
 if command -v bw >/dev/null 2>&1 && [ -n "${BW_SESSION:-}" ]; then
-  _notes=$(bw get notes "Claude Code Global Config" 2>/dev/null || true)
-  if [ -n "$_notes" ]; then
-    mkdir -p "$HOME/.claude"
-    printf '%s\n' "$_notes" > "$HOME/.claude/CLAUDE.md"
-    log "Wrote ~/.claude/CLAUDE.md from Bitwarden (Claude Code Global Config)"
+  _bundle_exists=$(bw list items --search "Claude Code Config Bundle" 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    items = json.load(sys.stdin)
+except Exception:
+    items = []
+print('1' if any(i.get('name') == 'Claude Code Config Bundle' for i in items) else '0')
+")
+  if [ "$_bundle_exists" = "1" ]; then
+    log "Found 'Claude Code Config Bundle' — leaving CLAUDE.md to claude-sync"
+  else
+    _notes=$(bw get notes "Claude Code Global Config" 2>/dev/null || true)
+    if [ -n "$_notes" ]; then
+      mkdir -p "$HOME/.claude"
+      printf '%s\n' "$_notes" > "$HOME/.claude/CLAUDE.md"
+      log "Wrote ~/.claude/CLAUDE.md from Bitwarden (Claude Code Global Config, legacy)"
+    fi
   fi
 fi

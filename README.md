@@ -125,6 +125,7 @@ with `--reconfigure`, edit the file directly, or delete it to start fresh.
 | `mcp-context7`       | Enable the context7 MCP (signal — chezmoi registers it) | no           |
 | `mcp-bitbucket`      | Enable the Bitbucket MCP (aashari, signal-only)         | no           |
 | `mcp-jira`           | Enable the Jira MCP (sooperset/mcp-atlassian, signal)   | no           |
+| `claude-sync-shell`  | `claude-sync` function: pack/unpack `~/.claude/` as a BW attachment | no |
 
 Add your own component as a directory under `components/<name>/` with a
 `manifest.toml`. Components without a script for the current OS are
@@ -223,6 +224,49 @@ export BW_SESSION="$(bw unlock --raw)"
 PowerShell equivalent at `tools\seed-bw-identity.ps1`. The TUI manager
 covers everything these tools do plus MCP-secrets editing and SSH-key
 import-from-file/paste, so you'll rarely need them.
+
+## Syncing ~/.claude/ across machines
+
+Once `claude-sync-shell` is installed, you have a `claude-sync` shell function
+that ships your Claude Code config (settings, agents, commands, skills,
+hooks, plugin pins, per-project auto-memory) between machines via a single
+Bitwarden attachment — no bootstrap re-run required.
+
+```sh
+claude-sync push     # pack ~/.claude/ (whitelisted paths) → BW
+claude-sync pull     # download bundle → extract into ~/.claude/
+claude-sync status   # show bundle metadata in the vault
+claude-sync list     # preview the paths that would be packed
+```
+
+The function auto-unlocks BW if needed (same pattern as `bw-unlock`).
+You can also call the engine directly without the shell function:
+`bash tools/claude-sync.sh <cmd>` (set `BW_SESSION` yourself first).
+
+**BW item:** `Claude Code Config Bundle` — a Secure Note that carries one
+attachment, `claude-config.tar.gz`. The `notes` field stores push metadata
+(hostname, timestamp, size). The item is auto-created on first push.
+
+**What's in the bundle** (relative to `~/.claude/`):
+
+- `settings.json`, `CLAUDE.md`
+- `agents/`, `commands/`, `skills/`, `hooks/`
+- `plugins/installed_plugins.json`, `plugins/known_marketplaces.json`
+- `projects/*/memory/` (per-project auto-memory)
+
+**What's deliberately excluded** (volatile / machine-local): `sessions/`,
+`history.jsonl`, `cache/`, `paste-cache/`, `shell-snapshots/`,
+`file-history/`, `backups/`, `tasks/`, `plans/`, `session-env/`,
+`telemetry/`, `.credentials.json`, and all of `projects/*/` except
+`memory/`.
+
+**Migration from the legacy `Claude Code Global Config` item:** the
+chezmoi component still fetches CLAUDE.md from that item as a fallback,
+but only if the new `Claude Code Config Bundle` does not exist. Push from
+your primary machine once and the bundle takes over.
+
+A file-change watcher (auto-push debounce) is on the roadmap — for now
+`claude-sync push` is manual.
 
 ## Per-machine identity overrides
 
