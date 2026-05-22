@@ -10,14 +10,37 @@ $ErrorActionPreference = "Stop"
 
 $dir = $PSScriptRoot
 
-# Self-update + re-exec
-if ((Test-Path "$dir\.git") -and -not $env:_BOOTSTRAP_UPDATED) {
-    Write-Host "==> Updating machine-setup..." -ForegroundColor Green
-    & { $ErrorActionPreference = "Continue"; git -C $dir fetch origin 2>$null }
-    if ($LASTEXITCODE -eq 0) { git -C $dir reset --hard origin/HEAD }
-    $env:_BOOTSTRAP_UPDATED = "1"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File "$dir\bootstrap.ps1" @args
-    exit $LASTEXITCODE
+# Self-update + re-exec.
+#
+# Only safe to hard-reset when the working tree is clean AND we're on the
+# branch that tracks origin's default head (typically main). Otherwise the
+# user is doing local development on this repo and a reset would eat their
+# work — skip the update and let bootstrap proceed against the local tree.
+# Set $env:MACHINE_SETUP_SKIP_UPDATE=1 to bypass the update entirely.
+if ((Test-Path "$dir\.git") -and -not $env:_BOOTSTRAP_UPDATED -and -not $env:MACHINE_SETUP_SKIP_UPDATE) {
+    $dirty   = & { $ErrorActionPreference = "Continue"; git -C $dir status --porcelain 2>$null } | Out-String
+    $branch  = & { $ErrorActionPreference = "Continue"; git -C $dir symbolic-ref --short HEAD 2>$null } | Out-String
+    $default = & { $ErrorActionPreference = "Continue"; git -C $dir symbolic-ref --short refs/remotes/origin/HEAD 2>$null } | Out-String
+    $dirty   = $dirty.Trim()
+    $branch  = $branch.Trim()
+    $default = $default.Trim() -replace '^origin/', ''
+    if (-not $dirty -and $branch -and $default -and ($branch -eq $default)) {
+        Write-Host "==> Updating machine-setup..." -ForegroundColor Green
+        & { $ErrorActionPreference = "Continue"; git -C $dir fetch origin 2>$null }
+        if ($LASTEXITCODE -eq 0) { git -C $dir reset --hard "origin/$default" }
+        $env:_BOOTSTRAP_UPDATED = "1"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File "$dir\bootstrap.ps1" @args
+        exit $LASTEXITCODE
+    } else {
+        if ($dirty) {
+            Write-Host "==> Skipping self-update: working tree has local changes" -ForegroundColor Yellow
+        } elseif (-not $branch) {
+            Write-Host "==> Skipping self-update: HEAD is detached" -ForegroundColor Yellow
+        } elseif ($branch -ne $default) {
+            Write-Host "==> Skipping self-update: on branch '$branch' (default is '$default')" -ForegroundColor Yellow
+        }
+        $env:_BOOTSTRAP_UPDATED = "1"
+    }
 }
 
 # Find or install python3 (winget). main.py requires 3.11+ for tomllib.
